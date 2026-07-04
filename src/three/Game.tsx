@@ -5,6 +5,8 @@ import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
 import * as THREE from 'three';
 import { Bull } from './Bull';
 import { Track } from './Track';
+import { SimScene } from './SimScene';
+import { SIM_MODE } from '../sim/flag';
 
 function SkyBackdrop() {
     const tex = useTexture('/skybox.jpg');
@@ -50,8 +52,14 @@ export function Game() {
 
             <Suspense fallback={null}>
                 <SkyBackdrop />
-                <Bull />
-                <Track />
+                {SIM_MODE ? (
+                    <SimScene />
+                ) : (
+                    <>
+                        <Bull />
+                        <Track />
+                    </>
+                )}
             </Suspense>
 
             <EffectComposer>

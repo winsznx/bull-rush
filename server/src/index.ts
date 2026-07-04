@@ -8,11 +8,27 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createCanvas, loadImage, GlobalFonts } from '@napi-rs/canvas';
 import { sql, initSchema } from './db.ts';
-import { redis, LB, rateLimit, recordScore, topScores } from './redis.ts';
+import {
+    redis,
+    LB,
+    rateLimit,
+    recordScore,
+    topScores,
+    rebuildLeaderboards,
+    claimMilestone,
+    getMilestone,
+    MILESTONE_DISTANCE,
+} from './redis.ts';
 import { rankFor } from './ranks.ts';
+import { simulate, type Act, type InputEvent } from './sim/sim.ts';
 
 // Must mirror the game's MAX_SPEED for the anti-cheat plausibility gate.
 const MAX_SPEED = 64;
+// A run can't plausibly last longer than this, and its claimed duration can't
+// exceed how long the token actually existed (+ slack for the game-over screen,
+// name entry, and network). Together these kill crafted "instant 50-minute" submits.
+const MAX_RUN_MS = 1_800_000;
+const RUN_TIME_SLACK_MS = 30_000;
 
 // Share-card assets (bundled, loaded once at boot).
 const ASSET_DIR = join(dirname(fileURLToPath(import.meta.url)), '../assets');
@@ -21,6 +37,36 @@ const cardBase = await loadImage(readFileSync(join(ASSET_DIR, 'card-base.jpg')))
 
 const esc = (s: string) =>
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+// When false (default), replay verification runs in SHADOW mode: agreement is
+// logged but the leaderboard still uses the client's claimed values. Flip to
+// 'true' to ENFORCE — server owns the re-simulated score, mismatches are hidden,
+// the milestone requires a verified run, and bot-like traces are flagged.
+const VERIFY_ENFORCE = process.env.VERIFY_ENFORCE === 'true';
+
+// Flat [tick,act,tick,act,...] -> input events.
+function decodeInputs(il: number[]): InputEvent[] {
+    const out: InputEvent[] = [];
+    for (let i = 0; i + 1 < il.length; i += 2) {
+        const act = il[i + 1];
+        if (act === 0 || act === 1 || act === 2) out.push({ tick: il[i], act: act as Act });
+    }
+    return out;
+}
+
+// Log-only bot signals on the (already replay-verified) trace: robotic regularity
+// or superhuman input rate. Reaction-time-vs-obstacle analysis is a later add.
+function botLike(inputs: InputEvent[], endTick: number): boolean {
+    if (inputs.length < 30) return false;
+    const gaps: number[] = [];
+    for (let i = 1; i < inputs.length; i++) gaps.push(inputs[i].tick - inputs[i - 1].tick);
+    const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+    if (mean <= 0) return true;
+    const variance = gaps.reduce((a, g) => a + (g - mean) * (g - mean), 0) / gaps.length;
+    const cv = Math.sqrt(variance) / mean;
+    const perSec = inputs.length / (endTick / 60 || 1);
+    return cv < 0.06 || perSec > 12;
+}
 
 const app = new Hono();
 
@@ -37,8 +83,9 @@ app.use(
 const ipOf = (c: { req: { header: (k: string) => string | undefined } }) =>
     c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || c.req.header('x-real-ip') || 'anon';
 
+const BOOT_TIME = Date.now();
 app.get('/', (c) => c.text('BULL RUSH API — charge.'));
-app.get('/health', (c) => c.json({ ok: true }));
+app.get('/health', (c) => c.json({ ok: true, startedAt: BOOT_TIME }));
 
 app.post('/api/run/start', async (c) => {
     const ip = ipOf(c);
@@ -46,7 +93,10 @@ app.post('/api/run/start', async (c) => {
 
     const token = randomUUID();
     const seed = randomBytes(16).toString('hex');
-    await redis.set(`seed:${token}`, JSON.stringify({ seed, t: Date.now(), ip }), 'EX', 180);
+    // TTL must exceed the longest possible run — a marathon past ~9500m takes
+    // several minutes, and a short TTL silently dropped those high scores.
+    // Token is single-use (getdel on submit), so a generous window is safe.
+    await redis.set(`seed:${token}`, JSON.stringify({ seed, t: Date.now(), ip }), 'EX', 3600);
     return c.json({ seed, token });
 });
 
@@ -66,6 +116,9 @@ const SubmitSchema = z.object({
     maxCombo: z.number().int().min(0).max(100_000).optional(),
     wallet: z.string().max(64).optional(),
     ref: z.string().regex(/^[A-Za-z0-9_-]{1,24}$/).optional(),
+    // Replay: flat [tick, act, ...] input log + total ticks, for server re-simulation.
+    il: z.array(z.number().int().min(0).max(200_000)).max(200_000).optional(),
+    ticks: z.number().int().min(0).max(60 * 60 * 45).optional(),
 });
 
 app.post('/api/run/submit', async (c) => {
@@ -80,23 +133,66 @@ app.post('/api/run/submit', async (c) => {
     const stored = await redis.getdel(`seed:${b.token}`);
     if (!stored) return c.json({ error: 'invalid_token' }, 400);
 
-    // anti-cheat plausibility gate
+    let meta: { seed?: string; t?: number } = {};
+    try {
+        meta = JSON.parse(stored) as { seed?: string; t?: number };
+    } catch {
+        meta = {};
+    }
+    // How long the token actually existed. A real run's duration can't exceed
+    // this — crafting a 50-minute run requires actually holding the token 50 min.
+    const wallClockMs = meta.t ? Date.now() - meta.t : b.durationMs;
+
+    // --- deterministic replay verification ---
+    // If the client submitted its input log, re-simulate from the SERVER-issued
+    // seed and derive the true score. Claimed numbers become advisory.
+    let replayOk: boolean | null = null;
+    let botFlag = false;
+    let dist = b.distance;
+    let score = b.score;
+    if (b.il && b.il.length >= 2 && b.ticks && meta.seed) {
+        const inputs = decodeInputs(b.il);
+        const r = simulate(meta.seed, inputs, b.ticks);
+        replayOk = Math.abs(r.distance - b.distance) <= 2 && Math.abs(r.score - b.score) <= 4;
+        botFlag = botLike(inputs, r.endTick);
+        await redis.incr(replayOk ? 'verify:match' : 'verify:mismatch');
+        if (botFlag) await redis.incr('verify:bot');
+        if (!replayOk) {
+            await redis.lpush(
+                'verify:recent',
+                JSON.stringify({ name: b.name, claimed: [b.distance, b.score], resim: [r.distance, r.score], at: Date.now() }),
+            );
+            await redis.ltrim('verify:recent', 0, 49);
+        }
+        if (VERIFY_ENFORCE) {
+            dist = r.distance;
+            score = r.score;
+        }
+    } else {
+        await redis.incr('verify:noreplay');
+    }
+
+    // Plausibility gate. Time checks always apply; the distance/score heuristics
+    // are skipped for a cleanly-verified replay (the re-simulation IS the truth).
     const sec = b.durationMs / 1000;
     const maxDist = MAX_SPEED * sec * 1.15 + 200;
-    const suspicious =
+    const verifiedClean = VERIFY_ENFORCE && replayOk === true;
+    let suspicious =
         b.durationMs < 1500 ||
-        b.distance > maxDist ||
-        b.score > b.distance * 3 + 10_000 ||
-        (b.jeetsDodged ?? 0) > sec * 6 + 20;
+        b.durationMs > wallClockMs + RUN_TIME_SLACK_MS ||
+        b.durationMs > MAX_RUN_MS ||
+        (!verifiedClean && (dist > maxDist || score > dist * 3 + 10_000 || (b.jeetsDodged ?? 0) > sec * 6 + 20));
+    if (VERIFY_ENFORCE && replayOk === false) suspicious = true; // claimed inputs don't reproduce the score
+    if (verifiedClean && botFlag) suspicious = true; // verified, but robotic
 
     const id = randomUUID();
-    const rank = rankFor(b.distance);
+    const rank = rankFor(dist);
 
     await sql`INSERT INTO runs ${sql({
         id,
         name: b.name,
-        distance: b.distance,
-        score: b.score,
+        distance: dist,
+        score,
         rank,
         death_cause: b.deathCause ?? null,
         jeets_dodged: b.jeetsDodged ?? 0,
@@ -107,14 +203,18 @@ app.post('/api/run/submit', async (c) => {
         wallet: b.wallet ?? null,
         referrer: b.ref ?? null,
         suspicious,
+        verified: replayOk === true,
+        replay_len: b.il?.length ?? 0,
     })}`;
 
     if (suspicious) return c.json({ ok: true, hidden: true, rank });
 
-    const member = JSON.stringify({ n: b.name, r: rank, id });
-    await recordScore(member, b.distance, b.ref);
-    const position = await redis.zrevrank(LB.alltime, member);
-    return c.json({ ok: true, rank, position: position === null ? null : position + 1 });
+    await recordScore(b.name, dist, b.ref);
+    // In enforce mode the marquee milestone can only be claimed by a verified run.
+    const milestoneEligible = dist >= MILESTONE_DISTANCE && (!VERIFY_ENFORCE || replayOk === true);
+    const firstTo20k = milestoneEligible ? await claimMilestone(b.name, dist) : false;
+    const position = await redis.zrevrank(LB.alltime, b.name);
+    return c.json({ ok: true, rank, position: position === null ? null : position + 1, firstTo20k, verified: replayOk });
 });
 
 app.get('/api/leaderboard', async (c) => {
@@ -125,6 +225,84 @@ app.get('/api/leaderboard', async (c) => {
     const entries = await topScores(key, limit);
     c.header('Cache-Control', 'public, s-maxage=10, stale-while-revalidate=30');
     return c.json({ period: squad ? `squad:${squad}` : period, entries });
+});
+
+// The "first to 20km" bounty — the single player who claimed it, or null.
+app.get('/api/milestone', async (c) => {
+    const milestone = await getMilestone();
+    c.header('Cache-Control', 'public, s-maxage=10, stale-while-revalidate=30');
+    return c.json({ milestone });
+});
+
+// Rebuild every leaderboard from Postgres (source of truth), collapsing to one
+// best row per player. Guarded by a shared secret; no-op unless ADMIN_KEY is set.
+app.post('/api/admin/rebuild', async (c) => {
+    const key = process.env.ADMIN_KEY;
+    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const result = await rebuildLeaderboards();
+    return c.json({ ok: true, ...result });
+});
+
+// Read-only diagnostics: is anything being hidden by the anti-cheat gate?
+app.get('/api/admin/stats', async (c) => {
+    const key = process.env.ADMIN_KEY;
+    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const [agg] = await sql`
+        SELECT count(*)::int AS total,
+               count(*) FILTER (WHERE suspicious)::int AS suspicious,
+               count(*) FILTER (WHERE distance >= 10000)::int AS over10k,
+               count(*) FILTER (WHERE distance >= 10000 AND suspicious)::int AS over10k_hidden,
+               max(distance)::int AS max_distance
+        FROM runs`;
+    const top = await sql`
+        SELECT name, distance, score, duration_ms, suspicious, verified, replay_len, death_cause
+        FROM runs ORDER BY distance DESC LIMIT 20`;
+    const [match, mismatch, noreplay, bot] = await Promise.all([
+        redis.get('verify:match'),
+        redis.get('verify:mismatch'),
+        redis.get('verify:noreplay'),
+        redis.get('verify:bot'),
+    ]);
+    const recentRaw = await redis.lrange('verify:recent', 0, 9);
+    const verify = {
+        enforce: VERIFY_ENFORCE,
+        match: Number(match ?? 0),
+        mismatch: Number(mismatch ?? 0),
+        noreplay: Number(noreplay ?? 0),
+        botFlags: Number(bot ?? 0),
+        recentMismatches: recentRaw.map((r) => {
+            try {
+                return JSON.parse(r) as unknown;
+            } catch {
+                return null;
+            }
+        }),
+    };
+    return c.json({ agg, verify, top });
+});
+
+// Delete cheat/implausible rows (flagged by the anti-cheat gate). Leaves every
+// legitimate run untouched, so it is safe to re-run.
+app.post('/api/admin/purge-suspicious', async (c) => {
+    const key = process.env.ADMIN_KEY;
+    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const deleted = await sql`DELETE FROM runs WHERE suspicious = true RETURNING name, distance, duration_ms`;
+    return c.json({ ok: true, deleted: deleted.length, rows: deleted });
+});
+
+// Retroactively flag runs that predate the wall-clock check and are humanly
+// impossible. Thresholds are tunable via query (?maxDistance=&maxDurationMs=).
+// Flags (reversible), doesn't delete — a rebuild then drops them from the board.
+app.post('/api/admin/flag-implausible', async (c) => {
+    const key = process.env.ADMIN_KEY;
+    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const maxDistance = Number(c.req.query('maxDistance') || 50_000);
+    const maxDurationMs = Number(c.req.query('maxDurationMs') || MAX_RUN_MS);
+    const flagged = await sql`
+        UPDATE runs SET suspicious = true
+        WHERE suspicious = false AND (distance > ${maxDistance} OR duration_ms > ${maxDurationMs})
+        RETURNING name, distance, duration_ms`;
+    return c.json({ ok: true, flagged: flagged.length, maxDistance, maxDurationMs, rows: flagged });
 });
 
 // Dynamic OG share card — the bull image with this run's score burned in.

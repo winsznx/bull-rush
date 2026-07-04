@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# local backend env (see docker-compose.yml)
+server/.env
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

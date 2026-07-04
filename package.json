@@ -8,7 +8,12 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "sync-sim": "node scripts/sync-sim.mjs",
+    "local:db": "docker compose up -d",
+    "local:db:down": "docker compose down",
+    "local:api": "cd server && node --env-file=.env --import tsx src/index.ts",
+    "local:verify": "npx tsx scripts/verify-local.ts"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",

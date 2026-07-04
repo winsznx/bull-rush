@@ -1,5 +1,6 @@
 import { useGameStore } from '../store';
 import { Audio } from '../audio';
+import { MilestoneBanner } from './Milestone';
 
 export function Menu() {
     const enterGate = useGameStore((s) => s.enterGate);
@@ -16,6 +17,7 @@ export function Menu() {
                 <div className="kicker">THE LAND OF THE MEMECOINS</div>
                 <img className="logo" src="/logo.png" alt="BULL RUSH" />
                 <p className="sub">Ride The Black Bull ($ANSEM). Dodge jeets, snipers &amp; MEV. Charge as far as you can.</p>
+                <MilestoneBanner />
                 <button className="btn primary" onClick={begin}>
                     ENTER THE GATE ▸
                 </button>

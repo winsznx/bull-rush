@@ -32,6 +32,8 @@ export async function initSchema(): Promise<void> {
             created_at  timestamptz DEFAULT now()
         )
     `;
+    await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS verified boolean DEFAULT false`;
+    await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS replay_len integer DEFAULT 0`;
     await sql`CREATE INDEX IF NOT EXISTS runs_distance_idx ON runs (distance DESC)`;
     await sql`CREATE INDEX IF NOT EXISTS runs_created_idx ON runs (created_at DESC)`;
 }

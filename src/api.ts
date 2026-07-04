@@ -1,6 +1,8 @@
 // Thin client for the Railway API. Everything degrades gracefully: if VITE_API_URL
 // is unset or the backend is unreachable, the game still plays fully offline and
 // falls back to local high scores.
+import { activeSim } from './sim/active';
+
 const BASE = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') || '';
 
 export const apiEnabled = BASE.length > 0;
@@ -21,6 +23,8 @@ export interface SubmitPayload {
     deathCause?: string;
     wallet?: string;
     ref?: string;
+    il?: number[];
+    ticks?: number;
 }
 
 function localSeed(): string {
@@ -49,11 +53,20 @@ export async function startRun(): Promise<{ seed: string; token: string | null }
 
 export async function submitRun(p: SubmitPayload): Promise<{ rank: string; position: number | null } | null> {
     if (!BASE) return null;
+    // Attach the deterministic input log so the server can re-simulate + verify.
+    const body: SubmitPayload = { ...p };
+    const runner = activeSim.runner;
+    if (runner && runner.log.length > 0) {
+        const il: number[] = [];
+        for (const ev of runner.log) il.push(ev.tick, ev.act);
+        body.il = il;
+        body.ticks = runner.tick;
+    }
     try {
         const r = await fetch(`${BASE}/api/run/submit`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(p),
+            body: JSON.stringify(body),
         });
         if (!r.ok) return null;
         return (await r.json()) as { rank: string; position: number | null };
@@ -62,13 +75,32 @@ export async function submitRun(p: SubmitPayload): Promise<{ rank: string; posit
     }
 }
 
+export interface Milestone {
+    name: string;
+    distance: number;
+    at: number;
+}
+
+export async function getMilestone(): Promise<Milestone | null> {
+    if (!BASE) return null;
+    try {
+        const r = await fetch(`${BASE}/api/milestone`);
+        if (!r.ok) return null;
+        const d = (await r.json()) as { milestone: Milestone | null };
+        return d.milestone;
+    } catch {
+        return null;
+    }
+}
+
 export async function getLeaderboard(
     period: 'alltime' | 'daily' | 'weekly' = 'alltime',
     squad?: string,
+    limit = 100,
 ): Promise<LbEntry[] | null> {
     if (!BASE) return null;
     try {
-        const q = new URLSearchParams({ period, limit: '20' });
+        const q = new URLSearchParams({ period, limit: String(limit) });
         if (squad) q.set('squad', squad);
         const r = await fetch(`${BASE}/api/leaderboard?${q.toString()}`);
         if (!r.ok) return null;

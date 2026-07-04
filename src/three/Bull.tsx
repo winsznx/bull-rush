@@ -15,7 +15,7 @@ import {
     DASH_COOLDOWN,
 } from '../store';
 
-type LegRefs = {
+export type LegRefs = {
     fl: RefObject<THREE.Group | null>;
     fr: RefObject<THREE.Group | null>;
     bl: RefObject<THREE.Group | null>;
@@ -186,7 +186,7 @@ function Leg({ refObj, x, z }: { refObj: RefObject<THREE.Group | null>; x: numbe
     );
 }
 
-function BullModel({ legs }: { legs: LegRefs }) {
+export function BullModel({ legs }: { legs: LegRefs }) {
     return (
         <group position={[0, 0, 0]}>
             {/* torso */}

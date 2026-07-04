@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useGameStore } from '../store';
 import { storage } from '../storage';
 import { getLeaderboard, apiEnabled, type LbEntry } from '../api';
+import { MilestoneBanner } from './Milestone';
 
 type Tab = 'alltime' | 'daily' | 'weekly' | 'squad';
 
@@ -45,6 +46,7 @@ export function Board() {
         <div className="overlay">
             <div className="panel board">
                 <div className="kicker">BULL BOARD {global ? '· GLOBAL' : '· LOCAL'}</div>
+                <MilestoneBanner />
                 {apiEnabled && (
                     <div className="tabs">
                         {tabs.map((t) => (
