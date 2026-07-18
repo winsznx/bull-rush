@@ -92,3 +92,16 @@ jobs:
           DATABASE_URL: postgresql://postgres:bullrush@localhost:5432/bullrush
           DATABASE_SSL: 'false'
       - run: npm run test:integration
+
+  contracts:
+    name: contracts (forge build + test, DailyGridRegistry/VerifiedRunRegistry/SeasonPrizeVault)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge fmt --check
+      - run: forge build
+      - run: forge test -vv

@@ -397,4 +397,56 @@ against real data), a migration linter/dry-run mode, and a rename-in-place migra
 `grid_runs`→`verified_runs` (unnecessary — it was never deployed, so the new name was used from
 migration 0004 directly).
 
+## Phase 6 — Smart contracts (DailyGridRegistry, VerifiedRunRegistry, SeasonPrizeVault)
+
+First on-chain layer. A new `contracts/` Foundry project (solc 0.8.28, `lib/forge-std` and
+`lib/openzeppelin-contracts@5.1.0` vendored as plain tracked files — matching BotSpend's own
+dependency pattern, not git submodules) with three contracts, none deployed yet.
+
+**`contracts/src/DailyGridRegistry.sol`** — publishes a day's grid parameters (seed, ruleset hash,
+game version, opens/closes window) once, on-chain. `openGrid` reverts on a duplicate `dayId` with
+no update path at all — turns "an operator cannot reroll a day's course" from a server-honesty
+assumption (ADR 0003) into a contract-enforced guarantee. `owner` (cold) and `scheduler` (hot,
+rotatable) are separate keys, matching BotSpend's owner/agent-key separation.
+
+**`contracts/src/VerifiedRunRegistry.sol`** — the on-chain competitive receipt: one immutable
+record per server-verified run (`recordRun`, `onlyRelayer`), rejecting both a duplicate `runId`
+(anti-replay) and an unknown `gridId` (checked against an immutable `DailyGridRegistry`
+reference, not merely trusted from the caller). Tracks per-player personal best per grid and
+emits whether each run is one. Does not re-verify gameplay — that already happened server-side in
+Phase 2; this contract's only job is making the already-verified result tamper-evident.
+
+**`contracts/src/SeasonPrizeVault.sol`** — sponsor-funded, capped, publicly visible reward vault.
+No Bull Rush token, no wagering: every season is funded up front (native BOT or an ERC20, sponsor's
+choice), capped, and gated by a Merkle root that can be published exactly once (`publishMerkleRoot`
+reverts if already set) — "rules published before competition" as an on-chain guarantee, not a
+policy. `claim(seasonId, account, amount, proof)` is deliberately one permissionless function
+serving both self-claim and a relayer's `claimFor` — the Merkle proof already authorizes exactly
+`(account, amount)` regardless of who calls, and funds always move to `account`, never
+`msg.sender`.
+
+**`contracts/script/Deploy.s.sol`** — reviewed, not run. Deploys all three in dependency order;
+Phase 15 is the gated point where this is actually broadcast.
+
+**Testing — genuinely run, including a real static-analysis pass:**
+- `forge build` — compiles clean.
+- `forge fmt --check` — clean.
+- `forge test -vv` — **43/43 passing** (11 DailyGridRegistry, 10 VerifiedRunRegistry, 22
+  SeasonPrizeVault) covering every revert reason, both funding assets, permissionless claim-for
+  and self-claim, double-claim/double-record/duplicate-dayId rejection, personal-best tracking in
+  both directions, hot-key rotation, and a full 4-leaf Merkle tree claimed down to exactly its cap.
+- `forge build --sizes` — all three contracts comfortably under the 24,576-byte EVM limit.
+- `slither .` — ran against all three contracts; one `arbitrary-send-eth` finding on the vault's
+  claim payout (reviewed and accepted — it's the intended `claimFor` design, gated by proof +
+  cap + double-claim checks executing before it) and benign day/hour-granularity `timestamp`
+  findings; no reentrancy finding. See ADR 0006 for the full disposition.
+- One real bug was caught and fixed while writing tests (not left in): 3 `SeasonPrizeVaultTest`
+  cases initially failed because `vault.NATIVE()` called inline as a `createSeason(...)` argument
+  was itself an external call that consumed the preceding `vm.prank`/`vm.expectRevert`, masking
+  the intended assertion. Fixed by hoisting a local `NATIVE` constant.
+
+**Not done in Phase 6** (see ADR 0006): no relayer/indexer wiring the live server to these
+contracts (Phase 7), no actual deployment to any network (Phase 15), no contract-driven grid
+scheduling automation (still an `onlyScheduler` EOA), no Merkle tree generation tooling (Phase 10).
+
 <!-- Append future phase entries below this line, in commit order. -->
