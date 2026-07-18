@@ -263,4 +263,76 @@ on-chain seed source/scheduler/indexer (Phase 4/6/7), a dedicated "my personal b
 visible leaderboard" endpoint, and versioned migrations for the three new tables (Phase 5, together
 with the original `runs` table).
 
+## Phase 4: Wallet identity + SIWE — `identity_key` becomes real
+
+See `docs/adr/0004-wallet-stack-and-siwe-sessions.md` for the full rationale, including a
+dependency-vulnerability investigation that turned up real `npm audit` findings and the concrete
+(not assumed) evidence for why they don't block this stack.
+
+**Wallet stack**: `viem`/`wagmi`/`@tanstack/react-query`, matching BotSpend's proven versions.
+`src/wallet/chain.ts` — BOT Chain mainnet (677)/testnet (968), using the exact live-verified
+values from Phase 0, not re-typed from memory. `src/wallet/wagmiConfig.ts` — `injected()` only, no
+WalletConnect/MetaMask-SDK. `npm audit` flagged 21 findings the moment `wagmi` was installed;
+investigated to the actual built bundle (grepped for the vulnerable packages' distinctive runtime
+code — confirmed absent; only inert metadata/error-taxonomy strings reference their names) rather
+than assumed safe or panic-upgraded to a breaking wagmi v3. `npm audit` now runs in CI,
+informational (`continue-on-error`), so a *different* future finding stays visible.
+
+**SIWE, hand-rolled, not the `siwe` package**: `src/wallet/siwe.ts` (client, builds the EIP-4361
+message) + `server/src/siwe.ts` (server, parses + verifies via `viem`'s `verifyMessage`) — the two
+sides share the public EIP-4361 format, not code, so there's nothing to `sync-sim`-style keep in
+sync. 8 unit tests (`server/src/siwe.test.ts`), including a genuinely-signed message via a
+throwaway test private key, a forged-signature rejection, wrong-domain/wrong-chain rejections
+(phishing-relay defenses), and issued/expiry bounds.
+
+**Sessions** (`server/src/auth.ts`, new): two-tier — a 15-minute Redis-only access token (checked
+on every gated request, one GET) and a 30-day Postgres-backed refresh token (only its SHA-256 hash
+stored; rotates on every use, so a replayed old refresh token fails outright once rotated — proven
+against a real Postgres). New tables `users` (keyed `UNIQUE(chain_id, wallet_address)`,
+case-insensitive-unique optional `display_name`), `auth_nonces` (hash-stored, single-use, atomic
+consume), `sessions`. Cookies: `br_session`/`br_refresh`, `HttpOnly`/`SameSite=Lax`/`Secure` in
+prod, refresh cookie scoped to `Path=/api/auth`. CORS updated to `credentials: true`. Display names
+are cosmetic only — reserved-name list, rate-limited changes (3/day), never the identity key.
+
+**Identity finally real**: `/api/grid/ticket` and `/api/grid/submit` now require a valid session
+(`requireGridSession`) and derive `identityKey = "${chainId}:${walletAddress}"` from it — never
+from a client-supplied name. `/api/grid/submit` also checks the consumed ticket's stored identity
+matches the current session's. Practice play and the pre-existing global leaderboard remain fully
+unauthenticated, per spec — only Daily Grid (the surface Phase 3/ADR 0003 flagged as needing real
+identity) is gated.
+
+**Client**: `src/wallet/WalletProvider.tsx` (`WagmiProvider` + `QueryClientProvider`, wrapping the
+app in `main.tsx`), `src/wallet/useAuth.ts` (connect → chain-switch-if-needed → request nonce →
+sign → verify, one hook, only invoked from Daily Grid entry — never on the practice/CHARGE path),
+`src/authApi.ts` (session/nonce/verify/logout/display-name client, all `credentials: 'include'`).
+`src/ui/DailyGrid.tsx` rewritten: shows "CONNECT WALLET TO ENTER" until authenticated, then the
+truncated connected address, and resolves "YOUR BEST"/leaderboard rows against the session's
+identity instead of a typed name.
+
+**Testing — genuinely run:**
+- `server/src/siwe.test.ts` (8, pure logic + real signatures).
+- `server/src/auth.integration.test.ts` (6, **real Postgres+Redis**, new): session creation, nonce
+  single-use, refresh rotation (old token provably dead), revocation (both tokens dead
+  immediately), reserved/duplicate/too-short display-name rejection.
+- **Full HTTP path exercised live**, not just unit-tested: request nonce → sign a genuine SIWE
+  message with a throwaway wallet (`viem/accounts`, never a fund-holding key) → verify → receive
+  `br_session`/`br_refresh` cookies → confirmed an unauthenticated grid-ticket request is rejected
+  (401 `not_authenticated`) → confirmed the identical request WITH the session cookie passes the
+  auth gate → refresh (confirmed the access token actually changes) → logout (confirmed the
+  session no longer resolves via `GET /api/auth/session`).
+- Built the full production bundle specifically to verify the dependency-vulnerability assessment
+  above empirically (grepped the actual output), not just reason about it theoretically.
+
+**Verified after these changes:** `tsc --noEmit` clean on both packages; `sim:check` passes;
+`npm test` (fast unit suite, now includes `siwe.test.ts`) — 35/35 (+8); `sim:test` — 27/27
+unchanged; `test:integration` (renamed from `test:grid` now that it covers auth too — CI job
+renamed to `integration`) — 12/12 (+6) against real Postgres+Redis; a full `npm run build`
+succeeds (bundle grew from ~87KB to ~190KB gzipped-adjacent, as expected for a real wallet stack).
+
+**Not done in Phase 4** (explicitly deferred, see ADR 0004): refresh-token reuse-detection/
+session-family revocation, WalletConnect/mobile wallet support, BO-Wallet-specific compatibility
+testing (still unconfirmed — flagged since Phase 0), per-wallet (vs. per-IP) rate limiting on auth
+endpoints, and versioned migrations for the three new tables (Phase 5, alongside every other table
+so far).
+
 <!-- Append future phase entries below this line, in commit order. -->

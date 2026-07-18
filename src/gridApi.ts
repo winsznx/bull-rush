@@ -52,13 +52,17 @@ export type TicketResult =
     | { ok: true; ticketId: string; seed: `0x${string}`; expiresAt: number }
     | { ok: false; reason: string };
 
-export async function requestGridTicket(name: string, gridId: string): Promise<TicketResult> {
+// Requires an authenticated session (see src/authApi.ts) — the server derives
+// the ticket's identity from the session cookie, never from a client-supplied
+// name. A guest without a session gets `not_authenticated` back.
+export async function requestGridTicket(gridId: string): Promise<TicketResult> {
     if (!BASE) return { ok: false, reason: 'offline' };
     try {
         const r = await fetch(`${BASE}/api/grid/ticket`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, gridId }),
+            credentials: 'include',
+            body: JSON.stringify({ gridId }),
         });
         const d = (await r.json().catch(() => null)) as { ticket?: { id: string; seed: `0x${string}`; expiresAt: number }; error?: string } | null;
         if (!d) return { ok: false, reason: 'network_error' };
@@ -80,7 +84,7 @@ export interface GridSubmitResult {
     isPersonalBest?: boolean;
 }
 
-export async function submitGridRun(ticketId: string, name: string): Promise<GridSubmitResult | null> {
+export async function submitGridRun(ticketId: string): Promise<GridSubmitResult | null> {
     if (!BASE) return null;
     const runner = activeSim.runner;
     if (!runner || runner.log.length === 0) return null;
@@ -97,7 +101,8 @@ export async function submitGridRun(ticketId: string, name: string): Promise<Gri
         const r = await fetch(`${BASE}/api/grid/submit`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ticketId, name, replay }),
+            credentials: 'include',
+            body: JSON.stringify({ ticketId, replay }),
         });
         const d = (await r.json().catch(() => null)) as GridSubmitResult | { error: string } | null;
         if (!d) return null;

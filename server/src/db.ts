@@ -98,4 +98,60 @@ export async function initSchema(): Promise<void> {
         )
     `;
     await sql`CREATE INDEX IF NOT EXISTS grid_runs_grid_idx ON grid_runs (grid_id, distance DESC)`;
+
+    // Wallet identity + SIWE (Phase 4). Real identity, finally: a user is keyed
+    // by (chain_id, wallet_address) — never by the spoofable display name that
+    // `identity_key` stood in for through Phase 3. `display_name_normalized` has
+    // a partial unique index (case-insensitive uniqueness; NULLs don't collide,
+    // so a user can go without a display name).
+    await sql`
+        CREATE TABLE IF NOT EXISTS users (
+            id                        uuid PRIMARY KEY,
+            chain_id                  integer NOT NULL,
+            wallet_address            text NOT NULL,
+            display_name              text,
+            display_name_normalized   text,
+            status                    text NOT NULL DEFAULT 'active',
+            created_at                timestamptz DEFAULT now(),
+            last_seen_at              timestamptz DEFAULT now(),
+            risk_state                text NOT NULL DEFAULT 'none',
+            UNIQUE (chain_id, wallet_address)
+        )
+    `;
+    await sql`
+        CREATE UNIQUE INDEX IF NOT EXISTS users_display_name_idx
+        ON users (display_name_normalized) WHERE display_name_normalized IS NOT NULL
+    `;
+
+    // One-time SIWE nonces. `nonce_hash` (not the raw nonce) is stored so a
+    // database read alone can't be replayed into a valid login — matches the
+    // "store the hash, not the secret" discipline used for refresh tokens below.
+    await sql`
+        CREATE TABLE IF NOT EXISTS auth_nonces (
+            nonce_hash  text PRIMARY KEY,
+            wallet      text NOT NULL,
+            expires_at  timestamptz NOT NULL,
+            used_at     timestamptz,
+            created_at  timestamptz DEFAULT now()
+        )
+    `;
+
+    // Sessions: short-lived access token + longer-lived, rotating refresh
+    // token. Only `refresh_token_hash` is stored (never the raw token) —
+    // matches the key-management discipline documented in
+    // docs/BOTSPEND-REUSE-ASSESSMENT.md (verifying/agent-owner keys server-only,
+    // never logged) applied here to session secrets instead of chain keys.
+    await sql`
+        CREATE TABLE IF NOT EXISTS sessions (
+            id                  uuid PRIMARY KEY,
+            user_id             uuid NOT NULL REFERENCES users(id),
+            refresh_token_hash  text NOT NULL,
+            created_at          timestamptz DEFAULT now(),
+            expires_at          timestamptz NOT NULL,
+            revoked_at          timestamptz,
+            device_label        text,
+            risk_metadata       jsonb
+        )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id)`;
 }

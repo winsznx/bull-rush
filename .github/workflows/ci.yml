@@ -7,7 +7,7 @@ on:
 
 jobs:
   game:
-    name: game (typecheck, sim:check, sim:test, build)
+    name: game (typecheck, sim:check, test, sim:test, build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,6 +16,10 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      # Installed so fast unit tests that happen to live under server/src (e.g.
+      # siwe.test.ts) can resolve their own dependencies regardless of which
+      # ones root's package.json also happens to carry.
+      - run: cd server && npm ci
       # A fresh CI checkout never has the gitignored, unlicensed local music files,
       # so this passes here by construction — it exists to catch a future deploy
       # or commit that reintroduces them, not to pass by accident.
@@ -24,8 +28,17 @@ jobs:
       # Non-mutating: fails if server/src/sim/* has drifted from src/sim/* (i.e.
       # someone edited the sim without running `npm run sim:sync`).
       - run: npm run sim:check
+      - run: npm test
       - run: npm run sim:test
       - run: npm run build
+      # Informational only, not a hard gate — see docs/adr/0004-wallet-stack.md
+      # for the specific, assessed reason: the only current findings are in
+      # wagmi's optional metaMask()/walletConnect() connector modules, which
+      # this project never imports (only the bare injected() connector is
+      # used) and are confirmed absent from the built bundle. Tracked here so
+      # the finding stays visible rather than silently forgotten, and so a
+      # NEW, different finding shows up in CI output for a human to triage.
+      - run: npm audit || true
 
   server:
     name: server (typecheck)
@@ -43,8 +56,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
 
-  grid-integration:
-    name: grid lifecycle (real Postgres + Redis)
+  integration:
+    name: grid + auth lifecycle (real Postgres + Redis)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -74,4 +87,4 @@ jobs:
           cache: npm
       - run: npm ci
       - run: cd server && npm ci
-      - run: npm run test:grid
+      - run: npm run test:integration

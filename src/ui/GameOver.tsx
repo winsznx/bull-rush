@@ -41,7 +41,7 @@ export function GameOverScreen() {
         if (localId.current) storage.rename(localId.current, finalName);
 
         if (refs.gridTicketId) {
-            void submitGridRun(refs.gridTicketId, finalName).then((res) => {
+            void submitGridRun(refs.gridTicketId).then((res) => {
                 if (res) setVerified(res);
             });
             return;

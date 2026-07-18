@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useGameStore } from '../store';
-import { storage } from '../storage';
+import { useAuth } from '../wallet/useAuth';
 import { getCurrentGrid, getGridLeaderboard, requestGridTicket, type GridInfo, type GridLbEntry } from '../gridApi';
 
 function fmtCountdown(ms: number): string {
@@ -11,9 +11,15 @@ function fmtCountdown(ms: number): string {
     return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+function truncateAddress(addr: string): string {
+    return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
+
 export function DailyGrid() {
     const reset = useGameStore((s) => s.reset);
     const startGridRun = useGameStore((s) => s.startGridRun);
+    const { session, status, error, signIn } = useAuth();
+
     const [grid, setGrid] = useState<GridInfo | null | undefined>(undefined);
     const [verifiedPlayers, setVerifiedPlayers] = useState(0);
     const [board, setBoard] = useState<GridLbEntry[]>([]);
@@ -38,10 +44,13 @@ export function DailyGrid() {
 
     const enter = async () => {
         if (!grid) return;
+        if (!session.authenticated) {
+            await signIn();
+            return; // player taps "ENTER THE GRID ▸" again once connected
+        }
         setRequesting(true);
         setRejection(null);
-        const name = (storage.name() || 'ANON').trim() || 'ANON';
-        const result = await requestGridTicket(name, grid.id);
+        const result = await requestGridTicket(grid.id);
         setRequesting(false);
         if (!result.ok) {
             setRejection(result.reason);
@@ -50,12 +59,28 @@ export function DailyGrid() {
         startGridRun(result.seed, result.ticketId, grid.id);
     };
 
-    const myBest = board.find((e) => e.identityKey === (storage.name() || 'ANON').trim());
+    const myIdentityKey = session.authenticated && session.wallet && session.chainId ? `${session.chainId}:${session.wallet}` : null;
+    const myBest = board.find((e) => e.identityKey === myIdentityKey);
+    const busy = requesting || status === 'connecting' || status === 'switching_chain' || status === 'signing' || status === 'verifying';
+
+    const buttonLabel = () => {
+        if (status === 'connecting') return 'CONNECTING WALLET…';
+        if (status === 'switching_chain') return 'SWITCH TO BOT CHAIN…';
+        if (status === 'signing') return 'SIGN IN YOUR WALLET…';
+        if (status === 'verifying') return 'VERIFYING…';
+        if (requesting) return 'REQUESTING TICKET…';
+        if (!grid?.isOpenForTickets) return 'NOT OPEN YET';
+        if (!session.authenticated) return 'CONNECT WALLET TO ENTER ▸';
+        return 'ENTER THE GRID ▸';
+    };
 
     return (
         <div className="overlay">
             <div className="panel board">
                 <div className="kicker">DAILY GRID</div>
+                {session.authenticated && session.wallet && (
+                    <div className="sub">Connected: {truncateAddress(session.wallet)}</div>
+                )}
                 {grid === undefined && <p className="sub">Loading the grid…</p>}
                 {grid === null && grid !== undefined && <p className="sub">No grid is open right now. Check back soon.</p>}
                 {grid && (
@@ -81,7 +106,7 @@ export function DailyGrid() {
                                 {board.slice(0, 8).map((e) => (
                                     <li key={`${e.position}-${e.identityKey}`}>
                                         <span className="rk">{e.position}</span>
-                                        <span className="nm">{e.identityKey}</span>
+                                        <span className="nm">{e.identityKey === myIdentityKey ? 'YOU' : truncateAddress(e.identityKey.split(':')[1] ?? e.identityKey)}</span>
                                         <span className="ds">{e.distance.toLocaleString()} m</span>
                                         <span className="rt" />
                                     </li>
@@ -89,10 +114,12 @@ export function DailyGrid() {
                             </ol>
                         )}
 
-                        {rejection && <div className="not-ready">{rejection.replace(/_/g, ' ').toUpperCase()}</div>}
+                        {(rejection || error) && (
+                            <div className="not-ready">{(rejection ?? error ?? '').replace(/_/g, ' ').toUpperCase()}</div>
+                        )}
 
-                        <button className="btn primary" onClick={() => void enter()} disabled={requesting || !grid.isOpenForTickets}>
-                            {requesting ? 'REQUESTING TICKET…' : grid.isOpenForTickets ? 'ENTER THE GRID ▸' : 'NOT OPEN YET'}
+                        <button className="btn primary" onClick={() => void enter()} disabled={busy || !grid.isOpenForTickets}>
+                            {buttonLabel()}
                         </button>
                     </>
                 )}

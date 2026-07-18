@@ -65,6 +65,20 @@ npm run sim:test    # vitest suite (determinism/replay/runner/e2e) + cross-proce
 `sim:check` and `sim:test` both run in CI (`.github/workflows/ci.yml`) and
 `sim:check` also runs as part of `npm run build`.
 
+## Daily Grid + wallet auth
+Entering Daily Grid requires connecting a wallet and signing a SIWE message —
+practice play never does. For this to work against a local API, `server/.env`
+needs `SITE_DOMAIN=localhost:8080` and `GAME_URL=http://localhost:8080` (the
+SIWE message's domain/URI are checked against these). A browser wallet
+extension (MetaMask or similar, using the injected provider) is needed to
+actually click through the flow in-browser.
+
+```bash
+npm test              # fast unit tests, incl. server/src/siwe.test.ts (no DB needed)
+npm run test:integration   # grid + auth lifecycle against real Postgres+Redis
+                            # (server/src/{grid,auth}.integration.test.ts)
+```
+
 ## Stop / reset
 ```bash
 npm run local:db:down     # stop DBs (keep data)
@@ -76,3 +90,5 @@ docker compose down -v    # stop + wipe all local data
   build still uses `.env.production` (real API URL) — local config can't leak into it.
 - There is no more shadow/enforce toggle. Verification is mandatory and unconditional
   — a submission without a valid, matching replay is rejected, full stop.
+- Session cookies require credentialed CORS (`ALLOWED_ORIGIN` must be a real
+  origin, not `*`) — already the case in every deployed environment.

@@ -1,5 +1,5 @@
 import { serve } from '@hono/node-server';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import { z } from 'zod';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -25,6 +25,17 @@ import { verifyReplayEnvelope } from './sim/verify.ts';
 import { REPLAY_SCHEMA_VERSION, type RunReplay } from './sim/replay.ts';
 import { GAME_VERSION, RULESET_HASH } from './sim/ruleset.ts';
 import { openGrid, getCurrentGrid, issueTicket, consumeTicket, recordGridRun, getGridLeaderboard, countVerifiedGridPlayers } from './grid.ts';
+import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
+import {
+    issueNonce,
+    verifyAndCreateSession,
+    resolveAccessToken,
+    refreshSession,
+    revokeSession,
+    setDisplayName,
+    BOT_CHAIN_MAINNET_ID,
+    type SessionTokens,
+} from './auth.ts';
 
 // A run can't plausibly last longer than this (a policy cap, stricter than the
 // engine's own technical ceiling in sim.ts/replay.ts), and its derived duration
@@ -64,8 +75,37 @@ app.use(
         origin: (o) => (allow.includes('*') ? o || '*' : allow.includes(o) ? o : allow[0] || ''),
         allowMethods: ['GET', 'POST', 'OPTIONS'],
         allowHeaders: ['Content-Type'],
+        // Session cookies require credentialed CORS. Browsers reject a wildcard
+        // origin combined with credentials, so this only actually works once
+        // ALLOWED_ORIGIN is set to a real origin list (already required in
+        // every deployed environment) — harmless if still '*' in a from-scratch
+        // local setup, since cookie-based auth just won't work until it's set.
+        credentials: true,
     }),
 );
+
+const SITE_DOMAIN = process.env.SITE_DOMAIN || 'trybullrush.xyz';
+const SITE_URL = process.env.GAME_URL || 'https://trybullrush.xyz';
+const ACCESS_COOKIE = 'br_session';
+const REFRESH_COOKIE = 'br_refresh';
+const isProd = process.env.NODE_ENV === 'production';
+
+function setSessionCookies(c: Parameters<typeof setCookie>[0], tokens: SessionTokens): void {
+    setCookie(c, ACCESS_COOKIE, tokens.accessToken, {
+        httpOnly: true,
+        secure: isProd,
+        sameSite: 'Lax',
+        path: '/',
+        expires: new Date(tokens.accessExpiresAt),
+    });
+    setCookie(c, REFRESH_COOKIE, tokens.refreshToken, {
+        httpOnly: true,
+        secure: isProd,
+        sameSite: 'Lax',
+        path: '/api/auth',
+        expires: new Date(tokens.refreshExpiresAt),
+    });
+}
 
 const ipOf = (c: { req: { header: (k: string) => string | undefined } }) =>
     c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || c.req.header('x-real-ip') || 'anon';
@@ -225,12 +265,107 @@ app.get('/api/milestone', async (c) => {
     return c.json({ milestone });
 });
 
-// ---- Daily Grid (Phase 3) ----
+// ---- Wallet identity + SIWE (Phase 4) ----
+// Guest players never hit any of these routes — practice play and the global
+// leaderboard above stay fully open. Only Daily Grid entry (below) requires a
+// session, per the product's own wallet-UX spec: connect only when it matters.
+
+const NonceRequestSchema = z.object({ wallet: z.string().regex(/^0x[0-9a-fA-F]{40}$/) });
+
+app.post('/api/auth/nonce', async (c) => {
+    const ip = ipOf(c);
+    if (!(await rateLimit(ip, 'auth-nonce', 20, 60))) return c.json({ error: 'rate_limited' }, 429);
+    const parsed = NonceRequestSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
+    const nonce = await issueNonce(parsed.data.wallet);
+    return c.json({ nonce });
+});
+
+const VerifyRequestSchema = z.object({ message: z.string().max(2000), signature: z.string().regex(/^0x[0-9a-fA-F]+$/) });
+
+app.post('/api/auth/verify', async (c) => {
+    const ip = ipOf(c);
+    if (!(await rateLimit(ip, 'auth-verify', 20, 60))) return c.json({ error: 'rate_limited' }, 429);
+    const parsed = VerifyRequestSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
+
+    const result = await verifyAndCreateSession(parsed.data.message, parsed.data.signature as `0x${string}`, {
+        expectedDomain: SITE_DOMAIN,
+        expectedUri: SITE_URL,
+        expectedChainId: BOT_CHAIN_MAINNET_ID,
+    });
+    // Never log the raw message/signature — only the outcome. (No log call
+    // here at all today; noted so a future logging pass doesn't add one.)
+    if (!result.ok) return c.json({ error: result.reason }, 401);
+
+    setSessionCookies(c, result.tokens);
+    return c.json({
+        ok: true,
+        wallet: result.user.wallet_address,
+        chainId: result.user.chain_id,
+        displayName: result.user.display_name,
+    });
+});
+
+app.get('/api/auth/session', async (c) => {
+    const accessToken = getCookie(c, ACCESS_COOKIE);
+    const session = accessToken ? await resolveAccessToken(accessToken) : null;
+    if (!session) return c.json({ authenticated: false });
+    return c.json({ authenticated: true, wallet: session.walletAddress, chainId: session.chainId });
+});
+
+app.post('/api/auth/refresh', async (c) => {
+    const refreshToken = getCookie(c, REFRESH_COOKIE);
+    if (!refreshToken) return c.json({ error: 'no_refresh_token' }, 401);
+    const result = await refreshSession(refreshToken);
+    if (!result.ok) {
+        deleteCookie(c, ACCESS_COOKIE, { path: '/' });
+        deleteCookie(c, REFRESH_COOKIE, { path: '/api/auth' });
+        return c.json({ error: result.reason }, 401);
+    }
+    setSessionCookies(c, result.tokens);
+    return c.json({ ok: true });
+});
+
+app.post('/api/auth/logout', async (c) => {
+    const accessToken = getCookie(c, ACCESS_COOKIE);
+    const refreshToken = getCookie(c, REFRESH_COOKIE);
+    await revokeSession(refreshToken, accessToken);
+    deleteCookie(c, ACCESS_COOKIE, { path: '/' });
+    deleteCookie(c, REFRESH_COOKIE, { path: '/api/auth' });
+    return c.json({ ok: true });
+});
+
+const DisplayNameRequestSchema = z.object({ name: z.string().max(24) });
+
+app.post('/api/auth/display-name', async (c) => {
+    const ip = ipOf(c);
+    if (!(await rateLimit(ip, 'display-name', 3, 24 * 60 * 60))) return c.json({ error: 'rate_limited' }, 429);
+    const accessToken = getCookie(c, ACCESS_COOKIE);
+    const session = accessToken ? await resolveAccessToken(accessToken) : null;
+    if (!session) return c.json({ error: 'not_authenticated' }, 401);
+    const parsed = DisplayNameRequestSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
+    const result = await setDisplayName(session.userId, parsed.data.name);
+    if (!result.ok) return c.json({ error: result.reason }, 409);
+    return c.json({ ok: true });
+});
+
+// A grid attempt requires a real session — this is the point past which
+// something (a leaderboard position, eventually a reward) attaches to the
+// identity, so the identity must be wallet-verified, not a typed display name.
+async function requireGridSession<E extends Record<string, unknown>, P extends string>(c: Context<E, P>) {
+    const accessToken = getCookie(c, ACCESS_COOKIE);
+    return accessToken ? resolveAccessToken(accessToken) : null;
+}
+
+// ---- Daily Grid (Phase 3 lifecycle, Phase 4 identity) ----
 // Every player on an open grid plays the identical, publicly re-derivable seed.
 // A run only counts if it was played against a server-issued, grid-bound,
 // one-time ticket, and is re-simulated exactly like a practice run (see
 // verifyReplayEnvelope/simulate above) but checked against the TICKET's seed,
-// not a per-run random one.
+// not a per-run random one. identityKey is now `${chainId}:${walletAddress}` —
+// derived from the session, never from a client-supplied name.
 
 app.get('/api/grid/current', async (c) => {
     const grid = await getCurrentGrid();
@@ -248,27 +383,31 @@ app.get('/api/grid/:id/leaderboard', async (c) => {
     return c.json({ gridId, entries });
 });
 
-const TicketRequestSchema = z.object({ name: NameSchema, gridId: z.string().uuid() });
+const TicketRequestSchema = z.object({ gridId: z.string().uuid() });
 
 app.post('/api/grid/ticket', async (c) => {
     const ip = ipOf(c);
     if (!(await rateLimit(ip, 'grid-ticket', 20, 60))) return c.json({ error: 'rate_limited' }, 429);
+    const session = await requireGridSession(c);
+    if (!session) return c.json({ error: 'not_authenticated' }, 401);
     const parsed = TicketRequestSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
-    const result = await issueTicket(parsed.data.name, parsed.data.gridId);
+    const identityKey = `${session.chainId}:${session.walletAddress}`;
+    const result = await issueTicket(identityKey, parsed.data.gridId);
     if ('rejected' in result) return c.json({ error: result.rejected }, 409);
     return c.json({ ticket: result.ticket });
 });
 
 const GridSubmitSchema = z.object({
     ticketId: z.string().uuid(),
-    name: NameSchema,
     replay: ReplaySchema,
 });
 
 app.post('/api/grid/submit', async (c) => {
     const ip = ipOf(c);
     if (!(await rateLimit(ip, 'grid-submit', 30, 60))) return c.json({ error: 'rate_limited' }, 429);
+    const session = await requireGridSession(c);
+    if (!session) return c.json({ error: 'not_authenticated' }, 401);
 
     const parsed = GridSubmitSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
@@ -277,6 +416,8 @@ app.post('/api/grid/submit', async (c) => {
 
     const ticket = await consumeTicket(b.ticketId);
     if (!ticket) return c.json({ error: 'invalid_or_expired_ticket' }, 400);
+    const identityKey = `${session.chainId}:${session.walletAddress}`;
+    if (ticket.identity_key !== identityKey) return c.json({ error: 'ticket_identity_mismatch' }, 403);
 
     const rejection = verifyReplayEnvelope(replay, { serverSeed: ticket.seed as `0x${string}` });
     if (rejection) {
@@ -297,7 +438,7 @@ app.post('/api/grid/submit', async (c) => {
     const { isPersonalBest } = await recordGridRun({
         gridId: ticket.grid_id,
         ticketId: ticket.id,
-        identityKey: b.name,
+        identityKey,
         distance: r.distance,
         score: r.score,
         maxCombo: r.maxCombo,
