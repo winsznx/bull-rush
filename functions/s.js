@@ -21,7 +21,7 @@ export function onRequestGet(context) {
     const card = `${CARD_API}?d=${encodeURIComponent(d)}&n=${encodeURIComponent(n)}&r=${encodeURIComponent(r)}`;
     const game = `${url.origin}/`;
     const title = esc(`${n} charged ${Number(d).toLocaleString()}m in BULL RUSH`);
-    const desc = esc(`Rank: ${r || 'Paper Horn'}. Can you survive the trenches? $ANSEM`);
+    const desc = esc(`Rank: ${r || 'Unverified'}. Replay-verified. Same grid. Prove the run.`);
 
     const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">

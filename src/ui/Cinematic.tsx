@@ -8,10 +8,10 @@ interface Beat {
 }
 
 const BEATS: Beat[] = [
-    { text: 'A checkpoint barrier blocks the road.' },
-    { text: 'Pumpfun guards the gate, and lets only the worthy pass.' },
-    { text: 'THE LAND OF\nTHE MEMECOINS', big: true },
-    { text: 'Only the bull that charges in his name may enter.' },
+    { text: 'Every player runs the same course.' },
+    { text: 'Every run is replayed and verified — not just trusted.' },
+    { text: 'BULL RUSH', big: true },
+    { text: 'Play first. Prove the run.' },
 ];
 
 const BEAT_MS = 2800;

@@ -1,6 +1,8 @@
 # 🐂 BULL RUSH
 
-A fast, dramatic **3D neon endless runner** for The Black Bull ($ANSEM) and the memecoin trenches. Charge forward, dodge Jeets / Snipers / MEV, grab powerups, and climb a global leaderboard — then share your run as a custom card.
+Bull Rush is a **verifiable skill runner** built on BOT Chain. Every Daily Grid gives players the same deterministic course, every competitive run is replay-verified, and sponsor-funded rewards settle through transparent onchain prize vaults.
+
+**Same grid. Prove the run.**
 
 **Play:** [trybullrush.xyz](https://trybullrush.xyz)
 
@@ -54,10 +56,22 @@ cd server && railway up --service bull-rush-api # API -> Railway
 
 ## A note on the music 🎵
 
-The soundtrack (Ansem's favorite tracks) is **not** included in this repo — those files are copyrighted and kept local only. Drop your own `.mp3`s into `public/assets/audio/music/` matching the names in `src/audio.ts` (`super-rush`, `butterfly-war`, `night-cloud`, `green-motion`, `vamp-charge`). SFX are synthesized in-browser, so the game runs fine without them.
+The production soundtrack is **not** included in this repo and, as of this migration, **must not
+be deployed** until it is replaced with licensed or commissioned music — see
+[`ASSET_PROVENANCE.md`](./ASSET_PROVENANCE.md) for the full status of every audio/visual asset and
+[`scripts/check-forbidden-assets.mjs`](./scripts/check-forbidden-assets.mjs), which fails the build
+if any of the known-unlicensed filenames are present. SFX are synthesized in-browser, so the game
+runs fine without any music files at all. If you have your own licensed tracks, drop them into
+`public/assets/audio/music/` matching the names in `src/audio.ts` (`super-rush`, `butterfly-war`,
+`night-cloud`, `green-motion`, `vamp-charge`) — those are mood-slot labels only, not song titles.
+
+## Rewards
+
+Rewards are funded before each competition and distributed only from verified results. Playing
+does not guarantee a reward, and Bull Rush does not issue an inflationary game token.
 
 ## License
 
 [MIT](./LICENSE)
 
-*Fan-made arcade game. Not financial advice, not an official endorsement.*
+*Not financial advice. Not an investment.*

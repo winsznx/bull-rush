@@ -335,10 +335,10 @@ app.get('/api/card.png', (c) => {
 
     ctx.fillStyle = '#8a93a6';
     ctx.font = '26px Anton';
-    ctx.fillText('CAN YOU SURVIVE THE TRENCHES?', 712, 520);
-    ctx.fillStyle = '#ff2d3a';
+    ctx.fillText('SAME GRID. PROVE THE RUN.', 712, 520);
+    ctx.fillStyle = '#39ff14';
     ctx.font = '46px Anton';
-    ctx.fillText('$ANSEM', 712, 576);
+    ctx.fillText('BULL RUSH', 712, 576);
 
     return new Response(canvas.toBuffer('image/png'), {
         headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' },
@@ -354,7 +354,7 @@ app.get('/s', (c) => {
     const card = `https://${host}/api/card.png?d=${encodeURIComponent(d)}&n=${encodeURIComponent(n)}&r=${encodeURIComponent(r)}`;
     const game = process.env.GAME_URL || 'https://bull-rush.pages.dev';
     const title = esc(`${n} charged ${Number(d).toLocaleString()}m in BULL RUSH`);
-    const desc = esc(`Rank: ${r || 'Paper Horn'}. Can you survive the trenches? $ANSEM`);
+    const desc = esc(`Rank: ${r || 'Unverified'}. Replay-verified. Same grid. Prove the run.`);
     return c.html(
         `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">

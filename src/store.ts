@@ -76,7 +76,7 @@ export function laneFromX(x: number): number {
     return Math.round(x / LANE_WIDTH);
 }
 
-export type Phase = 'intro' | 'menu' | 'gate' | 'playing' | 'dead' | 'board';
+export type Phase = 'intro' | 'menu' | 'tutorial' | 'playing' | 'dead' | 'board';
 
 export interface RunResult {
     distance: number;
@@ -104,7 +104,7 @@ interface GameState {
     finishIntro: () => void;
     triggerCloud: () => void;
     setMusicMode: (i: number) => void;
-    enterGate: () => void;
+    enterTutorial: () => void;
     openBoard: () => void;
     start: () => void;
     reset: () => void;
@@ -146,7 +146,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         else Audio.setMode(i);
         set({ musicMode: i });
     },
-    enterGate: () => set({ phase: 'gate' }),
+    enterTutorial: () => set({ phase: 'tutorial' }),
     openBoard: () => set({ phase: 'board' }),
     start: () => {
         resetRefs();

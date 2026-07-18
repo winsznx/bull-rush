@@ -1,12 +1,13 @@
 {
   "name": "bull-rush",
-  "description": "BULL RUSH — a 3D neon endless runner for The Black Bull ($ANSEM).",
+  "description": "BULL RUSH — a verifiable onchain skill runner built on BOT Chain.",
   "version": "0.2.0",
   "type": "module",
   "license": "MIT",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "node scripts/check-forbidden-assets.mjs && tsc --noEmit && vite build",
+    "check-assets": "node scripts/check-forbidden-assets.mjs",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "sync-sim": "node scripts/sync-sim.mjs",

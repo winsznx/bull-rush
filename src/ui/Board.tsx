@@ -45,7 +45,7 @@ export function Board() {
     return (
         <div className="overlay">
             <div className="panel board">
-                <div className="kicker">BULL BOARD {global ? '· GLOBAL' : '· LOCAL'}</div>
+                <div className="kicker">FINALITY BOARD {global ? '· GLOBAL' : '· LOCAL'}</div>
                 <MilestoneBanner />
                 {apiEnabled && (
                     <div className="tabs">

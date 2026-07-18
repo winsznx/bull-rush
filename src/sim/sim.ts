@@ -41,11 +41,11 @@ export const MAX_TICKS = 60 * TICK_HZ * 45; // 45 min hard ceiling
 // ---- Rules (embedded; damage -1 == instant death) ----
 type Hazard = { dmg: number; breakable: boolean; minTier: number; cause: string };
 const HAZARDS: Record<string, Hazard> = {
-    jeet: { dmg: 1, breakable: true, minTier: 0, cause: 'YOU GOT JEETED.' },
-    redCandle: { dmg: 1, breakable: true, minTier: 1, cause: 'RED CANDLE GOT YOU.' },
-    rug: { dmg: 1, breakable: true, minTier: 2, cause: 'THE RUG OPENED.' },
-    sniper: { dmg: 2, breakable: false, minTier: 1, cause: 'SNIPER CAUGHT YOU.' },
-    mev: { dmg: -1, breakable: false, minTier: 3, cause: 'MEV WIPED THE RUN.' },
+    jeet: { dmg: 1, breakable: true, minTier: 0, cause: 'A GLITCH NODE CAUGHT YOU.' },
+    redCandle: { dmg: 1, breakable: true, minTier: 1, cause: 'A CORRUPTED NODE STOPPED YOU.' },
+    rug: { dmg: 1, breakable: true, minTier: 2, cause: 'A FORK TRAP OPENED.' },
+    sniper: { dmg: 2, breakable: false, minTier: 1, cause: 'A VALIDATOR STRIKE CAUGHT YOU.' },
+    mev: { dmg: -1, breakable: false, minTier: 3, cause: 'A REORG WAVE WIPED THE RUN.' },
 };
 const HAZARD_KINDS = ['jeet', 'redCandle', 'rug', 'sniper', 'mev'] as const;
 const HAZARD_WEIGHT: Record<string, number> = { jeet: 4, redCandle: 2, rug: 2, sniper: 2, mev: 1 };

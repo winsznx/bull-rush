@@ -6,7 +6,7 @@ import { startRun } from './api';
 import { Game } from './three/Game';
 import { Hud } from './ui/Hud';
 import { Menu } from './ui/Menu';
-import { Gate } from './ui/Gate';
+import { Tutorial } from './ui/Tutorial';
 import { GameOverScreen } from './ui/GameOver';
 import { Board } from './ui/Board';
 import { Cinematic } from './ui/Cinematic';
@@ -73,7 +73,7 @@ export function App() {
             {phase === 'playing' && <Hud />}
             {phase === 'intro' && <Cinematic />}
             {phase === 'menu' && <Menu />}
-            {phase === 'gate' && <Gate />}
+            {phase === 'tutorial' && <Tutorial />}
             {phase === 'dead' && <GameOverScreen />}
             {phase === 'board' && <Board />}
             {phase === 'playing' && flashKey > 0 && <div key={flashKey} className="hitflash" />}

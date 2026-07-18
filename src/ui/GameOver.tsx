@@ -52,14 +52,13 @@ export function GameOverScreen() {
         if (!result) return;
         const cause = result.cause.replace(/\.$/, '').toLowerCase();
         const handle = (name || '').trim() || 'ANON';
-        const text = `I charged ${result.distance.toLocaleString()}m as The Black Bull before ${cause}.
+        const text = `I charged ${result.distance.toLocaleString()}m on the Bull Rush Daily Grid before ${cause}.
 
 Rank: ${result.rank}.
 
-Dodge jeets. Survive snipers. Avoid MEV.
-Can you survive the trenches?
+Every run is replay-verified. Same grid. Prove the run.
 
-#BullRush $ANSEM`;
+#BullRush`;
         const link = shareLink({ distance: result.distance, rank: result.rank, name: handle });
         const url = `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}${link ? `&url=${encodeURIComponent(link)}` : ''}`;
         window.open(url, '_blank', 'noopener,noreferrer');
@@ -100,7 +99,7 @@ Can you survive the trenches?
 
                 <div className="namebox">
                     <label className="namelabel" htmlFor="bull-name">
-                        ▸ ENTER YOUR NAME FOR THE LEADERBOARD
+                        ▸ OPERATOR CALLSIGN
                     </label>
                     <input
                         id="bull-name"
