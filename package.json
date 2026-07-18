@@ -6,11 +6,14 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/check-forbidden-assets.mjs && tsc --noEmit && vite build",
+    "build": "node scripts/check-forbidden-assets.mjs && npm run sim:check && tsc --noEmit && vite build",
     "check-assets": "node scripts/check-forbidden-assets.mjs",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "sync-sim": "node scripts/sync-sim.mjs",
+    "test": "vitest run",
+    "sim:sync": "node scripts/sync-sim.mjs",
+    "sim:check": "node scripts/sim-check.mjs",
+    "sim:test": "vitest run src/sim && node scripts/check-fingerprint.mjs",
     "local:db": "docker compose up -d",
     "local:db:down": "docker compose down",
     "local:api": "cd server && node --env-file=.env --import tsx src/index.ts",
@@ -34,6 +37,7 @@
     "@vitejs/plugin-react": "^5.0.0",
     "terser": "^5.39.0",
     "typescript": "~5.7.2",
-    "vite": "^6.3.1"
+    "vite": "^6.3.1",
+    "vitest": "^4.1.10"
   }
 }

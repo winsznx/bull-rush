@@ -21,12 +21,14 @@ import {
 } from './redis.ts';
 import { rankFor } from './ranks.ts';
 import { simulate, type Act, type InputEvent } from './sim/sim.ts';
+import { verifyReplayEnvelope } from './sim/verify.ts';
+import { REPLAY_SCHEMA_VERSION, type RunReplay } from './sim/replay.ts';
+import { GAME_VERSION, RULESET_HASH } from './sim/ruleset.ts';
 
-// Must mirror the game's MAX_SPEED for the anti-cheat plausibility gate.
-const MAX_SPEED = 64;
-// A run can't plausibly last longer than this, and its claimed duration can't
-// exceed how long the token actually existed (+ slack for the game-over screen,
-// name entry, and network). Together these kill crafted "instant 50-minute" submits.
+// A run can't plausibly last longer than this (a policy cap, stricter than the
+// engine's own technical ceiling in sim.ts/replay.ts), and its derived duration
+// can't exceed how long the token actually existed (+ slack for the game-over
+// screen, name entry, and network). Together these kill crafted, absurdly-long runs.
 const MAX_RUN_MS = 1_800_000;
 const RUN_TIME_SLACK_MS = 30_000;
 
@@ -37,22 +39,6 @@ const cardBase = await loadImage(readFileSync(join(ASSET_DIR, 'card-base.jpg')))
 
 const esc = (s: string) =>
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-
-// When false (default), replay verification runs in SHADOW mode: agreement is
-// logged but the leaderboard still uses the client's claimed values. Flip to
-// 'true' to ENFORCE — server owns the re-simulated score, mismatches are hidden,
-// the milestone requires a verified run, and bot-like traces are flagged.
-const VERIFY_ENFORCE = process.env.VERIFY_ENFORCE === 'true';
-
-// Flat [tick,act,tick,act,...] -> input events.
-function decodeInputs(il: number[]): InputEvent[] {
-    const out: InputEvent[] = [];
-    for (let i = 0; i + 1 < il.length; i += 2) {
-        const act = il[i + 1];
-        if (act === 0 || act === 1 || act === 2) out.push({ tick: il[i], act: act as Act });
-    }
-    return out;
-}
 
 // Log-only bot signals on the (already replay-verified) trace: robotic regularity
 // or superhuman input rate. Reaction-time-vs-obstacle analysis is a later add.
@@ -92,12 +78,24 @@ app.post('/api/run/start', async (c) => {
     if (!(await rateLimit(ip, 'start', 60, 60))) return c.json({ error: 'rate_limited' }, 429);
 
     const token = randomUUID();
-    const seed = randomBytes(16).toString('hex');
+    const seed = (`0x${randomBytes(16).toString('hex')}`) as `0x${string}`;
     // TTL must exceed the longest possible run — a marathon past ~9500m takes
     // several minutes, and a short TTL silently dropped those high scores.
     // Token is single-use (getdel on submit), so a generous window is safe.
     await redis.set(`seed:${token}`, JSON.stringify({ seed, t: Date.now(), ip }), 'EX', 3600);
     return c.json({ seed, token });
+});
+
+const ReplaySchema = z.object({
+    schemaVersion: z.number().int(),
+    gameVersion: z.string().max(32),
+    rulesetHash: z.string().regex(/^0x[0-9a-f]+$/i),
+    seed: z.string().regex(/^0x[0-9a-f]+$/i),
+    runId: z.string().max(64),
+    inputs: z
+        .array(z.object({ tick: z.number().int().min(0).max(200_000), action: z.number().int() }))
+        .max(20_000),
+    ticks: z.number().int().min(0).max(60 * 60 * 45),
 });
 
 const SubmitSchema = z.object({
@@ -106,21 +104,16 @@ const SubmitSchema = z.object({
         .string()
         .max(24)
         .transform((s) => s.replace(/[^\x20-\x7E]/g, '').trim().slice(0, 16) || 'ANON'),
-    distance: z.number().int().min(0).max(10_000_000),
-    score: z.number().int().min(0).max(50_000_000),
-    durationMs: z.number().int().min(0).max(7_200_000),
-    deathCause: z.string().max(40).optional(),
-    jeetsDodged: z.number().int().min(0).max(100_000).optional(),
-    snipersSurvived: z.number().int().min(0).max(100_000).optional(),
-    mevAvoided: z.number().int().min(0).max(100_000).optional(),
-    maxCombo: z.number().int().min(0).max(100_000).optional(),
     wallet: z.string().max(64).optional(),
     ref: z.string().regex(/^[A-Za-z0-9_-]{1,24}$/).optional(),
-    // Replay: flat [tick, act, ...] input log + total ticks, for server re-simulation.
-    il: z.array(z.number().int().min(0).max(200_000)).max(200_000).optional(),
-    ticks: z.number().int().min(0).max(60 * 60 * 45).optional(),
+    replay: ReplaySchema,
 });
 
+// Competitive scoring is replay-only: the client never sends distance/score/death
+// cause as trusted fields — every one of those is derived below from re-simulating
+// `replay` against the server's own seed, game version, and ruleset. A submission
+// with no replay, a mismatched version/ruleset/seed, or a structurally impossible
+// trace is rejected before a re-simulation is ever run (see verifyReplayEnvelope).
 app.post('/api/run/submit', async (c) => {
     const ip = ipOf(c);
     if (!(await rateLimit(ip, 'submit', 30, 60))) return c.json({ error: 'rate_limited' }, 429);
@@ -128,93 +121,81 @@ app.post('/api/run/submit', async (c) => {
     const parsed = SubmitSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
     const b = parsed.data;
+    const replay = b.replay as RunReplay;
 
     // one-time token: must exist (issued by /run/start, not yet used)
     const stored = await redis.getdel(`seed:${b.token}`);
     if (!stored) return c.json({ error: 'invalid_token' }, 400);
 
-    let meta: { seed?: string; t?: number } = {};
+    let meta: { seed?: `0x${string}`; t?: number } = {};
     try {
-        meta = JSON.parse(stored) as { seed?: string; t?: number };
+        meta = JSON.parse(stored) as { seed?: `0x${string}`; t?: number };
     } catch {
         meta = {};
     }
-    // How long the token actually existed. A real run's duration can't exceed
-    // this — crafting a 50-minute run requires actually holding the token 50 min.
-    const wallClockMs = meta.t ? Date.now() - meta.t : b.durationMs;
+    if (!meta.seed) return c.json({ error: 'invalid_token' }, 400);
 
-    // --- deterministic replay verification ---
-    // If the client submitted its input log, re-simulate from the SERVER-issued
-    // seed and derive the true score. Claimed numbers become advisory.
-    let replayOk: boolean | null = null;
-    let botFlag = false;
-    let dist = b.distance;
-    let score = b.score;
-    if (b.il && b.il.length >= 2 && b.ticks && meta.seed) {
-        const inputs = decodeInputs(b.il);
-        const r = simulate(meta.seed, inputs, b.ticks);
-        replayOk = Math.abs(r.distance - b.distance) <= 2 && Math.abs(r.score - b.score) <= 4;
-        botFlag = botLike(inputs, r.endTick);
-        await redis.incr(replayOk ? 'verify:match' : 'verify:mismatch');
-        if (botFlag) await redis.incr('verify:bot');
-        if (!replayOk) {
-            await redis.lpush(
-                'verify:recent',
-                JSON.stringify({ name: b.name, claimed: [b.distance, b.score], resim: [r.distance, r.score], at: Date.now() }),
-            );
-            await redis.ltrim('verify:recent', 0, 49);
-        }
-        if (VERIFY_ENFORCE) {
-            dist = r.distance;
-            score = r.score;
-        }
-    } else {
-        await redis.incr('verify:noreplay');
+    const rejection = verifyReplayEnvelope(replay, { serverSeed: meta.seed });
+    if (rejection) {
+        await redis.incr(`verify:rejected:${rejection}`);
+        return c.json({ error: rejection }, 400);
     }
 
-    // Plausibility gate. Time checks always apply; the distance/score heuristics
-    // are skipped for a cleanly-verified replay (the re-simulation IS the truth).
-    const sec = b.durationMs / 1000;
-    const maxDist = MAX_SPEED * sec * 1.15 + 200;
-    const verifiedClean = VERIFY_ENFORCE && replayOk === true;
-    let suspicious =
-        b.durationMs < 1500 ||
-        b.durationMs > wallClockMs + RUN_TIME_SLACK_MS ||
-        b.durationMs > MAX_RUN_MS ||
-        (!verifiedClean && (dist > maxDist || score > dist * 3 + 10_000 || (b.jeetsDodged ?? 0) > sec * 6 + 20));
-    if (VERIFY_ENFORCE && replayOk === false) suspicious = true; // claimed inputs don't reproduce the score
-    if (verifiedClean && botFlag) suspicious = true; // verified, but robotic
+    // --- deterministic replay verification: re-simulate from the server's own
+    // seed and derive EVERY canonical value from the result. Nothing here reads
+    // a client-claimed distance/score/duration/death-cause, because the client no
+    // longer sends any — see src/api.ts buildReplay().
+    const inputs: InputEvent[] = replay.inputs.map((i) => ({ tick: i.tick, act: i.action as Act }));
+    const r = simulate(meta.seed, inputs, replay.ticks);
+    const botFlag = botLike(inputs, r.endTick);
+    await redis.incr('verify:accepted');
+    if (botFlag) await redis.incr('verify:bot');
+
+    // How long the token actually existed. A real run's derived duration can't
+    // exceed this — crafting a 50-minute run requires actually holding the token
+    // 50 real minutes, not POSTing a long tick count instantly.
+    const wallClockMs = meta.t ? Date.now() - meta.t : Infinity;
+    const durationMs = Math.round((r.endTick / 60) * 1000);
+    const suspicious =
+        durationMs < 1500 || durationMs > wallClockMs + RUN_TIME_SLACK_MS || durationMs > MAX_RUN_MS || botFlag;
 
     const id = randomUUID();
-    const rank = rankFor(dist);
+    const rank = rankFor(r.distance);
+    const deathCause = r.alive ? 'RUN ENDED (TIME LIMIT).' : r.deathCause;
 
     await sql`INSERT INTO runs ${sql({
         id,
         name: b.name,
-        distance: dist,
-        score,
+        distance: r.distance,
+        score: r.score,
         rank,
-        death_cause: b.deathCause ?? null,
-        jeets_dodged: b.jeetsDodged ?? 0,
-        snipers_survived: b.snipersSurvived ?? 0,
-        mev_avoided: b.mevAvoided ?? 0,
-        max_combo: b.maxCombo ?? 0,
-        duration_ms: b.durationMs,
+        death_cause: deathCause,
+        jeets_dodged: 0,
+        snipers_survived: 0,
+        mev_avoided: 0,
+        max_combo: r.maxCombo,
+        duration_ms: durationMs,
         wallet: b.wallet ?? null,
         referrer: b.ref ?? null,
         suspicious,
-        verified: replayOk === true,
-        replay_len: b.il?.length ?? 0,
+        verified: true,
+        replay_len: replay.inputs.length,
     })}`;
 
     if (suspicious) return c.json({ ok: true, hidden: true, rank });
 
-    await recordScore(b.name, dist, b.ref);
-    // In enforce mode the marquee milestone can only be claimed by a verified run.
-    const milestoneEligible = dist >= MILESTONE_DISTANCE && (!VERIFY_ENFORCE || replayOk === true);
-    const firstTo20k = milestoneEligible ? await claimMilestone(b.name, dist) : false;
+    await recordScore(b.name, r.distance, b.ref);
+    const firstTo20k = r.distance >= MILESTONE_DISTANCE ? await claimMilestone(b.name, r.distance) : false;
     const position = await redis.zrevrank(LB.alltime, b.name);
-    return c.json({ ok: true, rank, position: position === null ? null : position + 1, firstTo20k, verified: replayOk });
+    return c.json({
+        ok: true,
+        rank,
+        distance: r.distance,
+        score: r.score,
+        deathCause,
+        position: position === null ? null : position + 1,
+        firstTo20k,
+    });
 });
 
 app.get('/api/leaderboard', async (c) => {
@@ -257,26 +238,16 @@ app.get('/api/admin/stats', async (c) => {
     const top = await sql`
         SELECT name, distance, score, duration_ms, suspicious, verified, replay_len, death_cause
         FROM runs ORDER BY distance DESC LIMIT 20`;
-    const [match, mismatch, noreplay, bot] = await Promise.all([
-        redis.get('verify:match'),
-        redis.get('verify:mismatch'),
-        redis.get('verify:noreplay'),
-        redis.get('verify:bot'),
-    ]);
-    const recentRaw = await redis.lrange('verify:recent', 0, 9);
+    const rejectionKeys = await redis.keys('verify:rejected:*');
+    const rejectionCounts = await Promise.all(rejectionKeys.map((k) => redis.get(k)));
+    const [accepted, bot] = await Promise.all([redis.get('verify:accepted'), redis.get('verify:bot')]);
     const verify = {
-        enforce: VERIFY_ENFORCE,
-        match: Number(match ?? 0),
-        mismatch: Number(mismatch ?? 0),
-        noreplay: Number(noreplay ?? 0),
+        gameVersion: GAME_VERSION,
+        rulesetHash: RULESET_HASH,
+        replaySchemaVersion: REPLAY_SCHEMA_VERSION,
+        accepted: Number(accepted ?? 0),
         botFlags: Number(bot ?? 0),
-        recentMismatches: recentRaw.map((r) => {
-            try {
-                return JSON.parse(r) as unknown;
-            } catch {
-                return null;
-            }
-        }),
+        rejected: Object.fromEntries(rejectionKeys.map((k, i) => [k.replace('verify:rejected:', ''), Number(rejectionCounts[i] ?? 0)])),
     };
     return c.json({ agg, verify, top });
 });

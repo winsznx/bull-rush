@@ -108,4 +108,87 @@ for "Daily Grid" as a live competition system (Phase 3), any change to the deter
 default-vs-`?sim=1` status (Phase 2), actual replacement music/art (owner-supplied), and wiring
 `check-assets`/`check-forbidden-assets` into CI (Phase 14, since no CI exists yet).
 
+## Phase 2: Make the deterministic engine the product
+
+See `docs/adr/0002-mandatory-replay-verification.md` for the full architectural rationale.
+Summary of what changed, concretely:
+
+**Engine promotion.** `src/three/Game.tsx` now renders `<SimScene/>` (the deterministic engine)
+unconditionally by default. The classic engine (`<Bull/><Track/>`) is reachable only via
+`?classic=1`, gated by `src/sim/flag.ts`'s `useClassicEngine(isDev, search)` — a pure, unit-tested
+function (`src/sim/flag.test.ts`) that returns `false` for every query string when `isDev` is
+false, so a production build cannot render the classic engine no matter what's in the URL. It
+never builds a replay, so it structurally cannot submit a score, appear on the leaderboard, or
+claim the milestone.
+
+**Canonical replay schema** (`src/sim/replay.ts`, new): `RunReplay` exactly per the task's
+specified shape (`schemaVersion`, `gameVersion`, `rulesetHash`, `seed`, `runId`, `inputs`, `ticks`),
+plus `canonicalStringify()` (recursive, sorted-key JSON — the "never hash arbitrary object
+serialization" requirement) and `fnv1aHex()` (a fast, deterministic, cross-runtime 32-bit hash —
+explicitly documented as NOT a cryptographic commitment; Phase 6's on-chain contracts will need
+keccak256 instead, noted directly in the file so it isn't forgotten). `validateReplayStructure()`
+implements every named structural rejection: missing input log, excessive log size, truncated/
+zero ticks, future tick, out-of-order tick, unknown action, impossible action frequency.
+
+**Ruleset hash** (`src/sim/ruleset.ts`, new; `src/sim/sim.ts`'s new exported `RULESET_SNAPSHOT`):
+every tunable that affects gameplay outcome is captured in one object and hashed. A replay whose
+`rulesetHash` doesn't match the server's own computed hash is rejected (`wrong_ruleset`) — this is
+the "enforceable consistency mechanism" replacing the old copy-and-hope-`sync-sim`-was-run model
+with something the server actively checks per submission, not just a build-time copy step.
+
+**Envelope verification** (`src/sim/verify.ts`, new): `verifyReplayEnvelope()` checks schema
+version, game version, ruleset hash, and seed, then delegates to `validateReplayStructure()` —
+all before a re-simulation is ever attempted, so a malformed or stale-client submission is
+rejected cheaply with a specific, named reason.
+
+**Mandatory enforcement — `VERIFY_ENFORCE` is deleted entirely.** There is no more shadow mode.
+`server/src/index.ts`'s `SubmitSchema` no longer has `distance`/`score`/`durationMs`/`deathCause`/
+`jeetsDodged`/etc. fields at all — the client (`src/api.ts` `buildReplay()`, `src/ui/GameOver.tsx`)
+sends only `{token, name, ref?, wallet?, replay}`. The server always derives distance, score, max
+combo, death cause, and duration from `simulate()`'s result. `GameOver.tsx` shows the server's
+canonical values once they arrive, with a small "RUN NOT VERIFIED · &lt;reason&gt;" note if
+rejected — the local, immediately-shown values are clearly provisional, not authoritative.
+
+**`maxCombo` is now real, tracked data** — added to `SimState`/`SimResult` (previously the DB
+column existed but was always populated from a client field the client never actually sent).
+
+**Source-of-truth enforcement, made real rather than just documented:**
+`npm run sim:sync` (renamed from `sync-sim`), `npm run sim:check` (new, non-mutating — diffs
+`src/sim/*` against `server/src/sim/*` without writing anything, fails on drift; verified working
+by deliberately corrupting the server copy and confirming it caught it, then restoring), and
+`npm run sim:test` (vitest suite + `scripts/check-fingerprint.mjs`'s cross-process determinism
+check, since a single vitest process can't prove that property by construction). `sim:check` now
+runs as a required step of `npm run build`, and both `sim:check` and `sim:test` run in the new
+`.github/workflows/ci.yml` (first CI this repo has ever had).
+
+**The ad hoc test scripts became a real vitest suite.** `src/sim/synctest.ts` → deleted, superseded
+by `src/sim/sim.determinism.test.ts`. `runner.test.ts` and `e2e.test.ts` rewritten in vitest's
+`describe`/`it`/`expect` form (given/when/then comments per this project's testing convention).
+`e2e.test.ts` now exercises every named rejection reason individually (wrong seed/version/ruleset/
+schema, missing/out-of-order/unknown-action/future-tick/excessive-size/impossible-frequency
+inputs) plus a maximum-duration-run bounded-runtime test and a truncated-log test. One real
+finding while writing the truncation test: for some seeds, truncating an input log's tail
+coincidentally reproduces the exact same distance/score as the honest run, because distance in
+this engine is time-based (not input-based) and a frozen post-truncation lane can coincidentally
+dodge the same hazards — this is not a security gap (nothing is gained by it; the server only
+ever computes from exactly what's submitted), but it meant the test needed a seed where the
+tail demonstrably matters, chosen empirically rather than assumed. `verify-local.ts` updated to
+match the new wire format (submits a full `RunReplay`, tests a wrong-seed rejection instead of the
+old claim-vs-resim mismatch, which no longer exists as a concept).
+
+**Verified:** `tsc --noEmit` clean on both packages; `npm run sim:check` passes (and was proven to
+correctly fail on deliberately-introduced drift, then recover); `npx vitest run` — 23/23 tests
+passing across 4 files; `npm run sim:test` (vitest + cross-process fingerprint) green; a full
+`npm run build` proven end-to-end by temporarily relocating (not deleting) the local unlicensed
+music files to a backup path, confirming the complete pipeline (asset check → sim:check →
+typecheck → vite build) succeeds, then restoring the files exactly. Local Docker-based live E2E
+(`npm run local:verify` against a running API) was not re-executed in this pass (Docker was not
+running); the script was updated to the new schema and reviewed, not live-tested end-to-end.
+
+**Not done in Phase 2** (explicitly sequenced later): the full Daily Grid competition lifecycle,
+run-ticket table (Phase 3); wallet-bound identity, SIWE (Phase 4); Postgres migrations replacing
+the ad hoc boot-time schema (Phase 5); any smart contract (Phase 6); a real cryptographic
+(keccak256) replay/ruleset commitment for on-chain use, as opposed to today's off-chain FNV32
+fingerprint (Phase 6, noted in ADR 0002 and `replay.ts`'s header so it isn't missed).
+
 <!-- Append future phase entries below this line, in commit order. -->

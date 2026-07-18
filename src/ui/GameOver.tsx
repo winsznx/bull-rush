@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useGameStore, refs } from '../store';
 import { storage } from '../storage';
-import { submitRun, shareLink } from '../api';
+import { submitRun, buildReplay, shareLink, type SubmitResult } from '../api';
 
 export function GameOverScreen() {
     const result = useGameStore((s) => s.result);
@@ -11,6 +11,9 @@ export function GameOverScreen() {
 
     const [name, setName] = useState(() => storage.name() || '');
     const [globalPos, setGlobalPos] = useState<number | null>(null);
+    // Server-derived, canonical outcome of the verified run — never the locally-
+    // guessed values. Only what's shown here is what actually counts globally.
+    const [verified, setVerified] = useState<SubmitResult | null>(null);
     const localId = useRef<string | null>(null);
     const submitted = useRef(false);
 
@@ -23,22 +26,24 @@ export function GameOverScreen() {
 
     // Global submit happens ONCE, with the name the player actually chose
     // (token is one-time). Triggered by acting on a button, or a grace timeout.
+    // The server re-simulates the run's replay and derives distance/score/rank/
+    // death cause itself — nothing about the run's outcome is trusted from here.
     const commit = () => {
         if (submitted.current || !result) return;
         submitted.current = true;
         const finalName = (name || '').trim() || 'ANON';
         if (localId.current) storage.rename(localId.current, finalName);
-        if (refs.token) {
+        const replay = refs.token ? buildReplay(refs.token) : null;
+        if (refs.token && replay) {
             void submitRun({
                 token: refs.token,
                 name: finalName,
-                distance: result.distance,
-                score: result.score,
-                durationMs: result.durationMs,
-                deathCause: result.cause,
+                replay,
                 ref: storage.ref() || undefined,
             }).then((res) => {
-                if (res && res.position) setGlobalPos(res.position);
+                if (!res) return;
+                setVerified(res);
+                if (res.ok && res.position) setGlobalPos(res.position);
             });
         }
     };
@@ -48,18 +53,25 @@ export function GameOverScreen() {
         fn();
     };
 
-    const share = () => {
-        if (!result) return;
-        const cause = result.cause.replace(/\.$/, '').toLowerCase();
-        const handle = (name || '').trim() || 'ANON';
-        const text = `I charged ${result.distance.toLocaleString()}m on the Bull Rush Daily Grid before ${cause}.
+    // Local values are shown immediately (no wait); once the server responds,
+    // its re-simulated values are canonical and replace them if they differ.
+    const dCause = verified?.ok ? (verified.deathCause ?? result?.cause) : result?.cause;
+    const dDistance = verified?.ok ? (verified.distance ?? result?.distance) : result?.distance;
+    const dScore = verified?.ok ? (verified.score ?? result?.score) : result?.score;
+    const dRank = verified?.ok ? (verified.rank ?? result?.rank) : result?.rank;
 
-Rank: ${result.rank}.
+    const share = () => {
+        if (!result || dDistance === undefined || dRank === undefined) return;
+        const causeText = (dCause ?? result.cause).replace(/\.$/, '').toLowerCase();
+        const handle = (name || '').trim() || 'ANON';
+        const text = `I charged ${dDistance.toLocaleString()}m on the Bull Rush Daily Grid before ${causeText}.
+
+Rank: ${dRank}.
 
 Every run is replay-verified. Same grid. Prove the run.
 
 #BullRush`;
-        const link = shareLink({ distance: result.distance, rank: result.rank, name: handle });
+        const link = shareLink({ distance: dDistance, rank: dRank, name: handle });
         const url = `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}${link ? `&url=${encodeURIComponent(link)}` : ''}`;
         window.open(url, '_blank', 'noopener,noreferrer');
     };
@@ -76,26 +88,31 @@ Every run is replay-verified. Same grid. Prove the run.
     }, [result]);
 
     if (!result) return null;
+    const cause = dCause ?? result.cause;
+    const distance = dDistance ?? result.distance;
+    const score = dScore ?? result.score;
+    const rank = dRank ?? result.rank;
 
     return (
         <div className="overlay dead">
             <div className="panel">
-                <div className="death">{result.cause}</div>
+                <div className="death">{cause}</div>
                 <div className="charged">
                     <span>YOU CHARGED</span>
-                    <strong>{result.distance.toLocaleString()} m</strong>
+                    <strong>{distance.toLocaleString()} m</strong>
                 </div>
                 <div className="stats">
                     <div>
                         <span>RANK</span>
-                        <b>{result.rank}</b>
+                        <b>{rank}</b>
                     </div>
                     <div>
                         <span>SCORE</span>
-                        <b>{result.score.toLocaleString()}</b>
+                        <b>{score.toLocaleString()}</b>
                     </div>
                 </div>
                 {globalPos && <div className="globalrank">GLOBAL&nbsp;#{globalPos.toLocaleString()}</div>}
+                {verified && !verified.ok && <div className="not-ready">RUN NOT VERIFIED{verified.rejected ? ` · ${verified.rejected}` : ''}</div>}
 
                 <div className="namebox">
                     <label className="namelabel" htmlFor="bull-name">

@@ -1,14 +1,19 @@
-# Local testing — the sim + verification loop
+# Local testing — the deterministic engine + mandatory verification
 
 Everything runs on your machine. Docker holds the DBs; the API and game run from source.
 
+The deterministic sim engine is the **only** engine used in production. The classic
+(client-authoritative) engine is dev-only, opt-in via `?classic=1` — see
+`src/sim/flag.ts`. Every competitive submission is a replay, re-simulated
+server-side; the server never trusts a claimed distance/score/death-cause.
+
 ## One-time
-- Docker Desktop running (already started).
-- `npm install` (root) and `cd server && npm install` — already done.
+- Docker Desktop running.
+- `npm install` (root) and `cd server && npm install`.
 
 ## Run it (3 terminals)
 
-**1. Databases** (already up; this is idempotent):
+**1. Databases** (idempotent):
 ```bash
 npm run local:db          # Postgres :5432 + Redis :6379
 ```
@@ -22,28 +27,43 @@ npm run local:api         # http://localhost:8787  (loads server/.env)
 ```bash
 npm run dev               # http://localhost:8080
 ```
-- **Sim-driven game (the new one):** http://localhost:8080/?sim=1
-- **Classic game (unchanged):** http://localhost:8080/
+- **Default (production path):** http://localhost:8080/ — the deterministic engine.
+- **Classic engine, dev-only:** http://localhost:8080/?classic=1 — for visual/feel
+  comparison only. Never reachable in a production build regardless of query string
+  (see `src/sim/flag.test.ts`); never submits a score.
 
-Play `?sim=1`, die, let it submit. The run's input log goes to the API, which
-re-simulates it and records the result.
+Play a run, die, let it submit. The run's canonical replay (seed, game version,
+ruleset hash, input trace) goes to the API, which re-simulates it and derives the
+distance/score/death-cause/rank from that alone.
 
-## Watch verification (shadow mode by default)
+## Watch verification
 ```bash
 curl -s -H "x-admin-key: local-admin-key" http://localhost:8787/api/admin/stats | jq .verify
 ```
-- `match` should climb with each honest run, `mismatch` stays 0.
-- `noreplay` counts classic-client submits (the `/?sim=1` client always sends a replay).
+- `accepted` climbs with every submitted replay that passes the envelope check
+  (whether or not the resulting run is later held as suspicious).
+- `rejected.<reason>` breaks down envelope/structural rejections by reason
+  (`wrong_seed`, `wrong_game_version`, `wrong_ruleset`, `wrong_schema_version`,
+  `missing_input_log`, `out_of_order_tick`, `unknown_action`, `future_tick`,
+  `excessive_log_size`, `impossible_action_frequency`).
+- `gameVersion`/`rulesetHash` show what the running server currently expects —
+  useful for confirming a deploy actually picked up a sim change.
 
 ## One-shot self-check (no browser)
 ```bash
-npm run local:verify      # plays a run, submits, asserts honest=match + tampered=mismatch
+npm run local:verify      # plays a run, submits it, then submits one with a wrong
+                           # seed, and asserts the first is accepted and the second rejected
 ```
 
-## Try ENFORCE mode
-Uncomment `VERIFY_ENFORCE=true` in `server/.env`, restart the API (terminal 2).
-Now the server uses the **re-simulated** score, the milestone requires a verified
-run, replay mismatches are hidden, and bot-like input traces are flagged.
+## Sim engine tooling
+```bash
+npm run sim:sync    # copy src/sim/* -> server/src/sim/* (run after editing src/sim)
+npm run sim:check   # non-mutating: fails if the server copy has drifted
+npm run sim:test    # vitest suite (determinism/replay/runner/e2e) + cross-process
+                     # fingerprint check
+```
+`sim:check` and `sim:test` both run in CI (`.github/workflows/ci.yml`) and
+`sim:check` also runs as part of `npm run build`.
 
 ## Stop / reset
 ```bash
@@ -54,5 +74,5 @@ docker compose down -v    # stop + wipe all local data
 ## Notes
 - `server/.env` and `.env.local` are git-ignored (local only). The production
   build still uses `.env.production` (real API URL) — local config can't leak into it.
-- If you edit anything under `src/sim/`, run `npm run sync-sim` so the server's
-  copy matches before testing the verify loop.
+- There is no more shadow/enforce toggle. Verification is mandatory and unconditional
+  — a submission without a valid, matching replay is rejected, full stop.

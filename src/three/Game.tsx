@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { Bull } from './Bull';
 import { Track } from './Track';
 import { SimScene } from './SimScene';
-import { SIM_MODE } from '../sim/flag';
+import { CLASSIC_MODE } from '../sim/flag';
 
 function SkyBackdrop() {
     const tex = useTexture('/skybox.jpg');
@@ -52,13 +52,13 @@ export function Game() {
 
             <Suspense fallback={null}>
                 <SkyBackdrop />
-                {SIM_MODE ? (
-                    <SimScene />
-                ) : (
+                {CLASSIC_MODE ? (
                     <>
                         <Bull />
                         <Track />
                     </>
+                ) : (
+                    <SimScene />
                 )}
             </Suspense>
 

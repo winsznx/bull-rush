@@ -54,6 +54,38 @@ const POWERUP_WEIGHT: Record<string, number> = { greenCandle: 5, diamondHorns: 4
 const POWERUP_MINTIER: Record<string, number> = { greenCandle: 0, diamondHorns: 1, stimmy: 2, blackCloud: 2 };
 const SAFE_ROWS = 3;
 
+// A single, exported snapshot of every rule/tuning constant that affects gameplay
+// outcome. Hashed (see ruleset.ts) into a rulesetHash that ships with every replay,
+// so a client running stale or mismatched rules is rejected with a clear reason
+// instead of silently mis-verified. This IS the "enforceable consistency mechanism"
+// replacing the old copy-and-hope-sync-sim-was-run trust model — extend this object
+// whenever a tunable above changes, or the hash won't reflect the real rules.
+export const RULESET_SNAPSHOT = {
+    tickHz: TICK_HZ,
+    laneWidthFp: LANE_WIDTH_FP,
+    startSpeedFp: START_SPEED_FP,
+    maxSpeedFp: MAX_SPEED_FP,
+    growthPerTickFp: GROWTH_PER_TICK_FP,
+    segmentUnits: SEGMENT_UNITS,
+    lookaheadUnits: LOOKAHEAD_UNITS,
+    healthMax: HEALTH_MAX,
+    dashTicks: DASH_TICKS,
+    dashCooldownTicks: DASH_COOLDOWN_TICKS,
+    invulnTicks: INVULN_TICKS,
+    cloudTicks: CLOUD_TICKS,
+    greenScore: GREEN_SCORE,
+    breakScore: BREAK_SCORE,
+    checkInterval: CHECK_INTERVAL,
+    maxTicks: MAX_TICKS,
+    safeRows: SAFE_ROWS,
+    hazards: HAZARDS,
+    hazardKinds: HAZARD_KINDS,
+    hazardWeight: HAZARD_WEIGHT,
+    powerupKinds: POWERUP_KINDS,
+    powerupWeight: POWERUP_WEIGHT,
+    powerupMinTier: POWERUP_MINTIER,
+} as const;
+
 // Difficulty is a function of row index (distance), NOT wall-clock — this is what
 // lets the client generate rows ahead of the player without diverging from the
 // server's replay.
@@ -99,6 +131,7 @@ export interface SimState {
     hearts: number;
     shield: boolean;
     combo: number;
+    maxCombo: number;
     dashUntil: number;
     dashReadyAt: number;
     invulnUntil: number;
@@ -116,6 +149,7 @@ export interface SimResult {
     distance: number;
     score: number;
     hearts: number;
+    maxCombo: number;
     deathCause: string;
     checksums: number[];
 }
@@ -193,6 +227,7 @@ export function createSim(seed: string): SimState {
         hearts: HEALTH_MAX,
         shield: false,
         combo: 0,
+        maxCombo: 0,
         dashUntil: -1,
         dashReadyAt: 0,
         invulnUntil: -1,
@@ -224,6 +259,7 @@ function resolve(s: SimState, c: Cell, lane: number, tick: number): void {
     if (tick < s.dashUntil && hz.breakable) {
         s.scoreFP += BREAK_SCORE * FP;
         s.combo++;
+        if (s.combo > s.maxCombo) s.maxCombo = s.combo;
         s.events.push({ type: 'break', kind: c.kind, lane });
         return;
     }
@@ -322,6 +358,7 @@ export function simulate(seed: string, inputs: InputEvent[], totalTicks: number)
         distance: simDistance(s),
         score: simScore(s),
         hearts: s.hearts,
+        maxCombo: s.maxCombo,
         deathCause: s.deathCause,
         checksums: s.checksums,
     };

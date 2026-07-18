@@ -1,4 +1,4 @@
-// AUTO-GENERATED from src/sim/prng.ts — DO NOT EDIT HERE. Edit src/sim and run `npm run sync-sim`.
+// AUTO-GENERATED from src/sim/prng.ts — DO NOT EDIT HERE. Edit src/sim and run `npm run sim:sync`.
 // Kept in server/ so the deployed API re-simulates with byte-identical code.
 
 // Deterministic, integer-only PRNG for the replay-verifiable simulation.
