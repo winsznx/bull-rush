@@ -9,7 +9,8 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
-    "dev:local": "node --env-file=.env --import tsx src/index.ts"
+    "dev:local": "node --env-file=.env --import tsx src/index.ts",
+    "db:migrate": "tsx src/migrate.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",

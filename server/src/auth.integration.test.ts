@@ -5,14 +5,15 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { privateKeyToAccount } from 'viem/accounts';
-import { sql, initSchema } from './db.ts';
+import { sql } from './db.ts';
+import { runMigrations } from './migrate.ts';
 import { redis } from './redis.ts';
 import { issueNonce, verifyAndCreateSession, resolveAccessToken, refreshSession, revokeSession, setDisplayName, BOT_CHAIN_MAINNET_ID } from './auth.ts';
 
 const CTX = { expectedDomain: 'trybullrush.xyz', expectedUri: 'https://trybullrush.xyz', expectedChainId: BOT_CHAIN_MAINNET_ID };
 
 beforeAll(async () => {
-    await initSchema();
+    await runMigrations();
 });
 
 afterAll(async () => {

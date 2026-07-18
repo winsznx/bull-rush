@@ -87,4 +87,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: cd server && npm ci
+      - run: npm run db:migrate
+        env:
+          DATABASE_URL: postgresql://postgres:bullrush@localhost:5432/bullrush
+          DATABASE_SSL: 'false'
       - run: npm run test:integration

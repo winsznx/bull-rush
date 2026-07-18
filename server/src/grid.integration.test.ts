@@ -9,12 +9,14 @@
 // so they land before this file's imports read process.env at module load time).
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { sql, initSchema } from './db.ts';
+import { sql } from './db.ts';
+import { runMigrations } from './migrate.ts';
 import { redis } from './redis.ts';
-import { openGrid, issueTicket, consumeTicket, recordGridRun, getGridLeaderboard } from './grid.ts';
+import { openGrid, issueTicket, consumeTicket, recordVerifiedRun, getGridLeaderboard } from './grid.ts';
+import { GAME_VERSION } from './sim/ruleset.ts';
 
 beforeAll(async () => {
-    await initSchema();
+    await runMigrations();
 });
 
 afterAll(async () => {
@@ -92,7 +94,7 @@ describe('Daily Grid lifecycle (real Postgres + Redis)', () => {
         const grid = await openGrid(dayId);
         await sql`UPDATE daily_grids SET opens_at = now() - interval '1 minute' WHERE id = ${grid.id}`;
         const identity = `player-${randomUUID()}`;
-        // grid_runs.ticket_id has a real FK to run_tickets — a run must
+        // verified_runs.ticket_id has a real FK to run_tickets — a run must
         // reference an actual issued ticket, same as the live endpoint flow.
         const issued = await issueTicket(identity, grid.id);
         if (!('ticket' in issued)) throw new Error('unreachable');
@@ -100,6 +102,8 @@ describe('Daily Grid lifecycle (real Postgres + Redis)', () => {
             gridId: grid.id,
             ticketId: issued.ticket.id,
             identityKey: identity,
+            gameVersion: GAME_VERSION,
+            replayHash: '0xdeadbeef' as `0x${string}`,
             maxCombo: 0,
             deathCause: 'test',
             durationMs: 1000,
@@ -107,13 +111,13 @@ describe('Daily Grid lifecycle (real Postgres + Redis)', () => {
             replayLen: 10,
         };
 
-        const first = await recordGridRun({ ...base, distance: 500, score: 500 });
+        const first = await recordVerifiedRun({ ...base, distance: 500, score: 500 });
         expect(first.isPersonalBest).toBe(true);
 
-        const worse = await recordGridRun({ ...base, distance: 300, score: 300 });
+        const worse = await recordVerifiedRun({ ...base, distance: 300, score: 300 });
         expect(worse.isPersonalBest).toBe(false);
 
-        const better = await recordGridRun({ ...base, distance: 800, score: 800 });
+        const better = await recordVerifiedRun({ ...base, distance: 800, score: 800 });
         expect(better.isPersonalBest).toBe(true);
 
         const board = await getGridLeaderboard(grid.id, 10);

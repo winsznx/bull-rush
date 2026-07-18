@@ -11,6 +11,7 @@ import { sql } from './db.ts';
 import { redis } from './redis.ts';
 import { dayIdFor, deriveGridSeed, gridWindowFor } from './sim/grid.ts';
 import { GAME_VERSION, RULESET_HASH } from './sim/ruleset.ts';
+import { canTransitionTicket } from './stateMachines.ts';
 
 const TICKET_TTL_SEC = 3600;
 
@@ -154,8 +155,12 @@ interface TicketRow {
 }
 
 // Atomic compare-and-set via the WHERE clause — Postgres guarantees only one
-// concurrent caller can move a ticket from 'issued' to 'consumed'.
+// concurrent caller can move a ticket from 'issued' to 'consumed'. The WHERE
+// clause IS the state-machine check at the database level; canTransitionTicket
+// is asserted too so a future edit that adds a status this doesn't expect
+// fails loudly in tests rather than silently allowing an illegal transition.
 export async function consumeTicket(ticketId: string): Promise<TicketRow | null> {
+    if (!canTransitionTicket('issued', 'consumed')) throw new Error('illegal ticket transition: issued -> consumed');
     const [row] = await sql<TicketRow[]>`
         UPDATE run_tickets SET status = 'consumed', consumed_at = now()
         WHERE id = ${ticketId} AND status = 'issued' AND expires_at > now()
@@ -165,12 +170,29 @@ export async function consumeTicket(ticketId: string): Promise<TicketRow | null>
     return row ?? null;
 }
 
+// Sweeps tickets whose expiry has passed while they were still sitting at
+// 'issued' (nobody ever consumed them) into the explicit 'expired' state, so
+// `status` reflects reality instead of silently going stale. No scheduler
+// exists yet (Phase 6's contract-driven scheduling is the eventual real one);
+// exposed as an admin-triggered endpoint in the interim — see index.ts.
+export async function sweepExpiredTickets(): Promise<number> {
+    if (!canTransitionTicket('issued', 'expired')) throw new Error('illegal ticket transition: issued -> expired');
+    const rows = await sql`
+        UPDATE run_tickets SET status = 'expired'
+        WHERE status = 'issued' AND expires_at <= now()
+        RETURNING id
+    `;
+    return rows.length;
+}
+
 export const LB_GRID = (gridId: string): string => `lb:grid:${gridId}`;
 
-export interface RecordGridRunParams {
+export interface RecordVerifiedRunParams {
     gridId: string;
     ticketId: string;
     identityKey: string;
+    gameVersion: string;
+    replayHash: `0x${string}`;
     distance: number;
     score: number;
     maxCombo: number;
@@ -184,8 +206,11 @@ export interface RecordGridRunParams {
 // identity's existing best on THIS grid updates the grid's leaderboard — a
 // worse run never overwrites a better one, and never needs to (there is no
 // on-chain receipt yet for this to needlessly re-trigger; Phase 6/7 will gate
-// receipt-queueing on this same `isPersonalBest` flag).
-export async function recordGridRun(p: RecordGridRunParams): Promise<{ isPersonalBest: boolean }> {
+// receipt-queueing on this same `isPersonalBest` flag). `status` is set
+// directly to its resting state (`verified` or `risk_hold`) — this codebase
+// verifies synchronously in one request, so `received`/`verifying` are never
+// actually persisted, only legal per the state machine (server/src/stateMachines.ts).
+export async function recordVerifiedRun(p: RecordVerifiedRunParams): Promise<{ isPersonalBest: boolean }> {
     const id = randomUUID();
     let isPersonalBest = false;
 
@@ -196,19 +221,21 @@ export async function recordGridRun(p: RecordGridRunParams): Promise<{ isPersona
     }
 
     await sql`
-        INSERT INTO grid_runs ${sql({
+        INSERT INTO verified_runs ${sql({
             id,
             grid_id: p.gridId,
             ticket_id: p.ticketId,
             identity_key: p.identityKey,
+            game_version: p.gameVersion,
+            replay_hash: p.replayHash,
             distance: p.distance,
             score: p.score,
             max_combo: p.maxCombo,
             death_cause: p.deathCause,
             duration_ms: p.durationMs,
-            suspicious: p.suspicious,
             is_personal_best: isPersonalBest,
             replay_len: p.replayLen,
+            status: p.suspicious ? 'risk_hold' : 'verified',
         })}
     `;
 

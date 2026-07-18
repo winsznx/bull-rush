@@ -7,7 +7,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createCanvas, loadImage, GlobalFonts } from '@napi-rs/canvas';
-import { sql, initSchema } from './db.ts';
+import { sql } from './db.ts';
+import { assertMigrationsApplied } from './migrate.ts';
 import {
     redis,
     LB,
@@ -22,9 +23,18 @@ import {
 import { rankFor } from './ranks.ts';
 import { simulate, type Act, type InputEvent } from './sim/sim.ts';
 import { verifyReplayEnvelope } from './sim/verify.ts';
-import { REPLAY_SCHEMA_VERSION, type RunReplay } from './sim/replay.ts';
+import { REPLAY_SCHEMA_VERSION, replayHash, type RunReplay } from './sim/replay.ts';
 import { GAME_VERSION, RULESET_HASH } from './sim/ruleset.ts';
-import { openGrid, getCurrentGrid, issueTicket, consumeTicket, recordGridRun, getGridLeaderboard, countVerifiedGridPlayers } from './grid.ts';
+import {
+    openGrid,
+    getCurrentGrid,
+    issueTicket,
+    consumeTicket,
+    recordVerifiedRun,
+    getGridLeaderboard,
+    countVerifiedGridPlayers,
+    sweepExpiredTickets,
+} from './grid.ts';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import {
     issueNonce,
@@ -435,10 +445,12 @@ app.post('/api/grid/submit', async (c) => {
     const suspicious = durationMs < 1500 || durationMs > MAX_RUN_MS || botFlag;
     const deathCause = r.alive ? 'RUN ENDED (TIME LIMIT).' : r.deathCause;
 
-    const { isPersonalBest } = await recordGridRun({
+    const { isPersonalBest } = await recordVerifiedRun({
         gridId: ticket.grid_id,
         ticketId: ticket.id,
         identityKey,
+        gameVersion: ticket.game_version,
+        replayHash: replayHash(replay),
         distance: r.distance,
         score: r.score,
         maxCombo: r.maxCombo,
@@ -470,6 +482,16 @@ app.post('/api/admin/grid/open', async (c) => {
     const dayId = c.req.query('dayId');
     const grid = await openGrid(dayId || undefined);
     return c.json({ ok: true, grid });
+});
+
+// Moves any run_tickets past their expiry from 'issued' to 'expired'. No
+// scheduler exists yet (Phase 6/7's relayer is the eventual real one);
+// operator-triggered in the interim, guarded the same way as other admin routes.
+app.post('/api/admin/sweep-expired-tickets', async (c) => {
+    const key = process.env.ADMIN_KEY;
+    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const count = await sweepExpiredTickets();
+    return c.json({ ok: true, swept: count });
 });
 
 // Rebuild every leaderboard from Postgres (source of truth), collapsing to one
@@ -602,5 +624,5 @@ Charging into BULL RUSH… <a style="color:#39ff14" href="${esc(game)}">tap to p
 });
 
 const port = Number(process.env.PORT || 8787);
-await initSchema();
+await assertMigrationsApplied();
 serve({ fetch: app.fetch, port }, (info) => console.log(`BULL RUSH API listening on :${info.port}`));

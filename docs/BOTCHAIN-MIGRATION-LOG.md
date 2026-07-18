@@ -335,4 +335,66 @@ testing (still unconfirmed — flagged since Phase 0), per-wallet (vs. per-IP) r
 endpoints, and versioned migrations for the three new tables (Phase 5, alongside every other table
 so far).
 
+## Phase 5 — Database migrations and explicit state machines
+
+Replaces every remaining ad hoc `CREATE TABLE IF NOT EXISTS` (the last of `server/src/db.ts`'s
+old `initSchema()`) with versioned SQL migrations, and makes the run/verified-run/claim lifecycle
+transitions explicit and testable instead of implicit in scattered `UPDATE` statements.
+
+**Migrations** (`server/migrations/0001`–`0006`, applied in order by `server/src/migrate.ts`,
+tracked in a new `schema_migrations` table):
+- `0001_runs.sql` — reproduces the real production `runs` table exactly (folding two historical
+  `ALTER TABLE`s into the `CREATE TABLE`) — a deliberate no-op against production, establishing
+  migration history without touching live data.
+- `0002_daily_grids.sql`, `0003_run_tickets.sql` — net-new, unchanged from Phase 3's ad hoc shape;
+  `0003` adds a `CHECK (status IN ('issued','consumed','expired'))` and a partial sweep index.
+- `0004_verified_runs.sql` — Phase 3's `grid_runs` renamed to its final name `verified_runs`
+  (never deployed to production, so a straight rename, no migration needed), gains `game_version`/
+  `replay_hash` columns, and replaces the old `suspicious` boolean with a `status` enum
+  (`received`/`verifying`/`verified`/`risk_hold`/`receipt_queued`/`submitted`/`confirmed`).
+- `0005_users_auth_sessions.sql` — Phase 4's `users`/`auth_nonces`/`sessions`, unchanged.
+- `0006_chain_jobs_claims_audit_logs.sql` — new, schema-ready-but-unused tables for Phase 6/7's
+  relayer outbox (`chain_jobs`) and Phase 10's reward claims (`claims`), plus `audit_logs`.
+
+**`server/src/migrate.ts`** — hand-rolled runner (not a library — see ADR 0005 for why):
+`runMigrations()` applies pending files in filename order, each in its own transaction;
+`assertMigrationsApplied()` is a read-only check called once at server boot (`server/src/index.ts`,
+replacing the old `await initSchema()` call) that refuses to start if any migration is missing —
+migrations themselves are never run automatically at boot, only via the explicit
+`npm run db:migrate`, specifically to avoid two replicas racing each other's DDL on deploy.
+
+**`server/src/stateMachines.ts`** (new) — pure `canTransitionTicket`/`canTransitionVerifiedRun`/
+`canTransitionClaim` functions, asserted at each relevant call site (e.g. `consumeTicket()`,
+the new `sweepExpiredTickets()`) as a guard against code drifting out of sync with the state
+machine; the real enforcement remains the database (`CHECK` constraints + atomic
+`UPDATE ... WHERE status = '<from>' ... RETURNING`).
+
+**`server/src/grid.ts`** — `recordGridRun` renamed to `recordVerifiedRun` (now takes and stores
+`gameVersion`/`replayHash`, writes to `verified_runs` with a `status` column instead of
+`suspicious`); new `sweepExpiredTickets()` moves stale `issued` tickets to `expired`, exposed via a
+new admin endpoint `POST /api/admin/sweep-expired-tickets` (`server/src/index.ts`, `ADMIN_KEY`-
+guarded like the existing admin routes — no scheduler exists yet, this is operator-triggered until
+Phase 6/7's relayer replaces it).
+
+**Testing — genuinely run, including a from-scratch database proof:**
+- `server/src/stateMachines.test.ts` — 7/7 passing.
+- `tsc --noEmit` clean on both packages after updating every call site off the deleted
+  `initSchema`/`recordGridRun` names (`server/src/grid.integration.test.ts`,
+  `server/src/auth.integration.test.ts` now call `runMigrations()` in `beforeAll` instead).
+- `sim:sync`/`sim:check` clean (no sim drift).
+- **Wiped the local dev Postgres volume entirely** (`docker compose down -v && docker compose up
+  -d`), ran `npm run db:migrate` against the resulting empty database (confirmed via CLI output:
+  all 6 migrations applied from nothing), then ran `npm run test:integration` — 12/12 passing
+  against that freshly-migrated database, not the previously-initialized one.
+- `npm test` — 42/42; `npm run sim:test` — 27/27 + cross-process fingerprint check.
+- Full `npm run build` succeeds (mp3s temporarily relocated per the established pattern, restored
+  after).
+- CI's `integration` job now runs `npm run db:migrate` against the Postgres service container
+  before the test step, matching the real fresh-database path proven above.
+
+**Not done in Phase 5** (see ADR 0005): rollback/`down` migrations (nothing yet needs reversing
+against real data), a migration linter/dry-run mode, and a rename-in-place migration for
+`grid_runs`→`verified_runs` (unnecessary — it was never deployed, so the new name was used from
+migration 0004 directly).
+
 <!-- Append future phase entries below this line, in commit order. -->

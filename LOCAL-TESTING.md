@@ -16,7 +16,13 @@ server-side; the server never trusts a claimed distance/score/death-cause.
 **1. Databases** (idempotent):
 ```bash
 npm run local:db          # Postgres :5432 + Redis :6379
+npm run db:migrate        # applies server/migrations/*.sql (idempotent, tracked in schema_migrations)
 ```
+
+Schema is managed entirely by versioned migrations now — there is no more boot-time
+`CREATE TABLE IF NOT EXISTS`. The API refuses to start against a database with
+pending migrations (`assertMigrationsApplied()` in `server/src/index.ts`), so this
+step is required after every fresh `local:db` volume.
 
 **2. API** (leave running):
 ```bash
