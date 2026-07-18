@@ -5,9 +5,14 @@ import { MilestoneBanner } from './Milestone';
 export function Menu() {
     const enterTutorial = useGameStore((s) => s.enterTutorial);
     const openBoard = useGameStore((s) => s.openBoard);
+    const openGridScreen = useGameStore((s) => s.openGridScreen);
     const begin = () => {
         Audio.unlock();
         enterTutorial();
+    };
+    const grid = () => {
+        Audio.unlock();
+        openGridScreen();
     };
     return (
         <div className="menu">
@@ -20,6 +25,9 @@ export function Menu() {
                 <MilestoneBanner />
                 <button className="btn primary" onClick={begin}>
                     CHARGE ▸
+                </button>
+                <button className="btn ghost" onClick={grid}>
+                    DAILY GRID
                 </button>
                 <button className="btn ghost" onClick={openBoard}>
                     FINALITY BOARD

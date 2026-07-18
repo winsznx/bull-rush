@@ -53,6 +53,11 @@ export const refs = {
     cloudUntil: 0,
     seed: '',
     token: null as string | null,
+    // Set only for a Daily Grid attempt (see startGridRun below). When present,
+    // App.tsx's practice run-start effect must NOT overwrite `seed` with a fresh
+    // random one, and GameOver.tsx submits via the grid endpoint, not practice.
+    gridTicketId: null as string | null,
+    gridId: null as string | null,
 };
 
 export function resetRefs(): void {
@@ -70,13 +75,15 @@ export function resetRefs(): void {
     // seed/token are set by the API on run start; cleared here
     refs.seed = '';
     refs.token = null;
+    refs.gridTicketId = null;
+    refs.gridId = null;
 }
 
 export function laneFromX(x: number): number {
     return Math.round(x / LANE_WIDTH);
 }
 
-export type Phase = 'intro' | 'menu' | 'tutorial' | 'playing' | 'dead' | 'board';
+export type Phase = 'intro' | 'menu' | 'tutorial' | 'playing' | 'dead' | 'board' | 'grid';
 
 export interface RunResult {
     distance: number;
@@ -106,7 +113,9 @@ interface GameState {
     setMusicMode: (i: number) => void;
     enterTutorial: () => void;
     openBoard: () => void;
+    openGridScreen: () => void;
     start: () => void;
+    startGridRun: (seed: `0x${string}`, ticketId: string, gridId: string) => void;
     reset: () => void;
     tick: (scoreDelta: number, dist: number, dashPct: number) => void;
     addScore: (n: number) => void;
@@ -148,8 +157,19 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
     enterTutorial: () => set({ phase: 'tutorial' }),
     openBoard: () => set({ phase: 'board' }),
+    openGridScreen: () => set({ phase: 'grid' }),
     start: () => {
         resetRefs();
+        set((s) => ({ phase: 'playing', hearts: HEALTH_MAX, score: 0, dist: 0, dashPct: 1, shield: false, combo: 0, result: null, runId: s.runId + 1 }));
+    },
+    // A Daily Grid attempt: the seed is the ticket's (shared, fixed for the
+    // grid), never a fresh random one — set atomically with the ticket/grid ids
+    // so App.tsx's practice run-start effect knows to skip fetching its own.
+    startGridRun: (seed, ticketId, gridId) => {
+        resetRefs();
+        refs.seed = seed;
+        refs.gridTicketId = ticketId;
+        refs.gridId = gridId;
         set((s) => ({ phase: 'playing', hearts: HEALTH_MAX, score: 0, dist: 0, dashPct: 1, shield: false, combo: 0, result: null, runId: s.runId + 1 }));
     },
     reset: () => set({ phase: 'menu', result: null }),

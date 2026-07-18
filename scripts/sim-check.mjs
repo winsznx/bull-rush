@@ -7,7 +7,7 @@
 // client just played.
 import { readFileSync, existsSync } from 'node:fs';
 
-const FILES = ['prng.ts', 'sim.ts', 'replay.ts', 'ruleset.ts', 'verify.ts'];
+const FILES = ['prng.ts', 'sim.ts', 'replay.ts', 'ruleset.ts', 'verify.ts', 'grid.ts'];
 const HEADER_LINES = 3; // the auto-generated header sync-sim.mjs prepends
 
 let drift = [];

@@ -191,4 +191,76 @@ the ad hoc boot-time schema (Phase 5); any smart contract (Phase 6); a real cryp
 (keccak256) replay/ruleset commitment for on-chain use, as opposed to today's off-chain FNV32
 fingerprint (Phase 6, noted in ADR 0002 and `replay.ts`'s header so it isn't missed).
 
+## Phase 3: Daily Grid lifecycle (built ahead of wallet identity — see ADR 0003)
+
+See `docs/adr/0003-daily-grid-lifecycle-pre-wallet.md` for the full rationale, in particular
+why this was buildable now (real, testable) rather than blocked on Phase 4/6, and what's
+explicitly deferred as a result (wallet-gating before entry, on-chain seed/scheduling/indexing,
+versioned migrations).
+
+**Shared, synced module** `src/sim/grid.ts` (new; added to `sim:sync`/`sim:check`'s file list):
+`deriveGridSeed(dayId)` — a pure, publicly re-derivable hash of `{dayId, gameVersion,
+rulesetHash}`, so an operator has nothing to reroll — plus `dayIdFor()`/`gridWindowFor()` for the
+UTC day id and the opens/closes window (a 5-minute public inspection delay before ticket issuance,
+a 24h competition window).
+
+**Database** (`server/src/db.ts`, same ad hoc `CREATE TABLE IF NOT EXISTS` pattern as the existing
+`runs` table — Phase 5 formalizes all of it): `daily_grids` (day_id UNIQUE — prevents overwrite/
+duplicate-day-id by construction), `run_tickets`, `grid_runs`. Columns use `identity_key`, not
+`user_id` — an explicit, named placeholder for Phase 4's real wallet-keyed identity, chosen
+specifically so that migration is a rename, not a redesign.
+
+**Server lifecycle** (`server/src/grid.ts`, new): `openGrid()` (idempotent — `ON CONFLICT (day_id)
+DO NOTHING`, always returns the one true row for that day), `getCurrentGrid()`, `issueTicket()`
+(rejects `grid_not_found`/`grid_not_open_yet`/`grid_closed`/`active_ticket_exists`; the one-active-
+ticket lock is a Redis `SET NX` taken before any Postgres write, closing the race between two
+concurrent requests from the same identity), `consumeTicket()` (atomic Postgres compare-and-set via
+`UPDATE ... WHERE status='issued' ... RETURNING *`), `recordGridRun()` (every verified attempt is
+recorded; only an improvement over the identity's existing best updates the grid's Redis
+leaderboard, via the same `ZADD ... GT` pattern the practice leaderboard already uses).
+
+**New routes** in `server/src/index.ts`: `GET /api/grid/current`, `GET /api/grid/:id/leaderboard`,
+`POST /api/grid/ticket`, `POST /api/grid/submit` (re-simulates against the *ticket's* seed via the
+same `verifyReplayEnvelope`/`simulate()` used by practice submission — no separate verification
+path was created), `POST /api/admin/grid/open` (the interim "authorised scheduler," guarded the
+same way the other admin routes are, until Phase 6's contract can open grids on-chain instead).
+
+**Client**: `src/gridApi.ts` (new) — `getCurrentGrid`, `getGridLeaderboard`, `requestGridTicket`,
+`submitGridRun`. `src/store.ts` — new `'grid'` phase, `refs.gridTicketId`/`refs.gridId`, and a
+dedicated `startGridRun(seed, ticketId, gridId)` action (separate from `start()`) so a grid
+attempt's ticket-bound seed can never be silently overwritten by the practice flow's random-seed
+fetch — confirmed by an explicit guard added to `App.tsx`'s run-start effect
+(`if (!refs.gridTicketId)`). `src/ui/DailyGrid.tsx` (new) — a minimal, functional panel (grid id,
+countdown, verified-run count, leaderboard, personal best if visible in the top N, ticket request)
+reached via a new "DAILY GRID" button on the menu. `src/ui/GameOver.tsx` — branches submission
+between the practice and grid endpoints based on `refs.gridTicketId`, and shows a "NEW GRID
+PERSONAL BEST" note when the server confirms one.
+
+**Testing — genuinely run, not just written:**
+- `src/sim/grid.test.ts` (4 tests, pure logic): seed determinism/day-sensitivity, window timing.
+- `server/src/grid.integration.test.ts` (6 tests, **against a real local Postgres + Redis**, not
+  mocks — `npm run test:grid`, new): idempotent grid-opening, both ticket-rejection paths, atomic
+  one-active-ticket lock + release on consumption, double-consumption prevention, personal-best-
+  gated leaderboard updates. All 6 passed against `docker compose up`'s actual containers.
+- New CI job `grid-integration` (`.github/workflows/ci.yml`) runs the same suite against Postgres/
+  Redis GitHub Actions service containers — this is not aspirational, it mirrors exactly what was
+  run locally.
+- **Full HTTP path exercised live**, not just unit-tested: started the real API server against the
+  real local DB stack, then via curl/a small script — opened a grid, confirmed opening the same day
+  twice is a no-op, confirmed the inspection-delay rejection, issued a ticket, confirmed a second
+  concurrent ticket request is rejected, played an actual run through `SimRunner` against the
+  ticket's seed, submitted it to `POST /api/grid/submit`, confirmed the server's derived distance
+  (238m)/score(738)/death-cause and `isPersonalBest: true`, confirmed the grid leaderboard reflected
+  it, and confirmed the now-consumed ticket could not be resubmitted (`invalid_or_expired_ticket`).
+
+**Verified after these changes:** `tsc --noEmit` clean on both packages; `sim:check` passes (now 6
+files); `sim:test` — 27/27 (up from 23, +4 for `grid.test.ts`); `test:grid` — 6/6 against real
+Postgres+Redis; a full `npm run build` re-proven end-to-end the same way as Phase 2 (temporarily
+relocating, then restoring, the local unlicensed music files).
+
+**Not done in Phase 3** (explicitly deferred, see ADR 0003): wallet-gating before grid entry, an
+on-chain seed source/scheduler/indexer (Phase 4/6/7), a dedicated "my personal best outside the
+visible leaderboard" endpoint, and versioned migrations for the three new tables (Phase 5, together
+with the original `runs` table).
+
 <!-- Append future phase entries below this line, in commit order. -->

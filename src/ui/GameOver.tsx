@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { useGameStore, refs } from '../store';
 import { storage } from '../storage';
 import { submitRun, buildReplay, shareLink, type SubmitResult } from '../api';
+import { submitGridRun, type GridSubmitResult } from '../gridApi';
+
+type AnyVerifiedResult = SubmitResult | GridSubmitResult;
 
 export function GameOverScreen() {
     const result = useGameStore((s) => s.result);
@@ -9,11 +12,12 @@ export function GameOverScreen() {
     const reset = useGameStore((s) => s.reset);
     const openBoard = useGameStore((s) => s.openBoard);
 
+    const isGridRun = !!refs.gridTicketId;
     const [name, setName] = useState(() => storage.name() || '');
     const [globalPos, setGlobalPos] = useState<number | null>(null);
     // Server-derived, canonical outcome of the verified run — never the locally-
     // guessed values. Only what's shown here is what actually counts globally.
-    const [verified, setVerified] = useState<SubmitResult | null>(null);
+    const [verified, setVerified] = useState<AnyVerifiedResult | null>(null);
     const localId = useRef<string | null>(null);
     const submitted = useRef(false);
 
@@ -25,14 +29,24 @@ export function GameOverScreen() {
     };
 
     // Global submit happens ONCE, with the name the player actually chose
-    // (token is one-time). Triggered by acting on a button, or a grace timeout.
-    // The server re-simulates the run's replay and derives distance/score/rank/
-    // death cause itself — nothing about the run's outcome is trusted from here.
+    // (token/ticket is one-time). Triggered by acting on a button, or a grace
+    // timeout. The server re-simulates the run's replay and derives distance/
+    // score/rank/death cause itself — nothing about the run's outcome is
+    // trusted from here. A Daily Grid attempt submits via the grid endpoint
+    // (ticket-bound, grid-scoped leaderboard); everything else is practice.
     const commit = () => {
         if (submitted.current || !result) return;
         submitted.current = true;
         const finalName = (name || '').trim() || 'ANON';
         if (localId.current) storage.rename(localId.current, finalName);
+
+        if (refs.gridTicketId) {
+            void submitGridRun(refs.gridTicketId, finalName).then((res) => {
+                if (res) setVerified(res);
+            });
+            return;
+        }
+
         const replay = refs.token ? buildReplay(refs.token) : null;
         if (refs.token && replay) {
             void submitRun({
@@ -96,6 +110,7 @@ Every run is replay-verified. Same grid. Prove the run.
     return (
         <div className="overlay dead">
             <div className="panel">
+                {isGridRun && <div className="kicker">DAILY GRID ATTEMPT</div>}
                 <div className="death">{cause}</div>
                 <div className="charged">
                     <span>YOU CHARGED</span>
@@ -112,6 +127,9 @@ Every run is replay-verified. Same grid. Prove the run.
                     </div>
                 </div>
                 {globalPos && <div className="globalrank">GLOBAL&nbsp;#{globalPos.toLocaleString()}</div>}
+                {verified?.ok && 'isPersonalBest' in verified && verified.isPersonalBest && (
+                    <div className="globalrank">NEW GRID PERSONAL BEST</div>
+                )}
                 {verified && !verified.ok && <div className="not-ready">RUN NOT VERIFIED{verified.rejected ? ` · ${verified.rejected}` : ''}</div>}
 
                 <div className="namebox">

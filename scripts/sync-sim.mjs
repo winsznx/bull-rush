@@ -4,7 +4,7 @@
 // `npm run sim:check` (non-mutating) fails CI if this ever falls out of sync.
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 
-const FILES = ['prng.ts', 'sim.ts', 'replay.ts', 'ruleset.ts', 'verify.ts'];
+const FILES = ['prng.ts', 'sim.ts', 'replay.ts', 'ruleset.ts', 'verify.ts', 'grid.ts'];
 const HEADER =
     '// AUTO-GENERATED from src/sim/$F — DO NOT EDIT HERE. Edit src/sim and run `npm run sim:sync`.\n' +
     '// Kept in server/ so the deployed API re-simulates with byte-identical code.\n\n';

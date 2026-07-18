@@ -14,6 +14,7 @@
     "sim:sync": "node scripts/sync-sim.mjs",
     "sim:check": "node scripts/sim-check.mjs",
     "sim:test": "vitest run src/sim && node scripts/check-fingerprint.mjs",
+    "test:grid": "vitest run --config server/vitest.config.ts",
     "local:db": "docker compose up -d",
     "local:db:down": "docker compose down",
     "local:api": "cd server && node --env-file=.env --import tsx src/index.ts",

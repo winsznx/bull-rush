@@ -24,6 +24,7 @@ import { simulate, type Act, type InputEvent } from './sim/sim.ts';
 import { verifyReplayEnvelope } from './sim/verify.ts';
 import { REPLAY_SCHEMA_VERSION, type RunReplay } from './sim/replay.ts';
 import { GAME_VERSION, RULESET_HASH } from './sim/ruleset.ts';
+import { openGrid, getCurrentGrid, issueTicket, consumeTicket, recordGridRun, getGridLeaderboard, countVerifiedGridPlayers } from './grid.ts';
 
 // A run can't plausibly last longer than this (a policy cap, stricter than the
 // engine's own technical ceiling in sim.ts/replay.ts), and its derived duration
@@ -98,12 +99,21 @@ const ReplaySchema = z.object({
     ticks: z.number().int().min(0).max(60 * 60 * 45),
 });
 
+// Shared identity sanitizer. Used both for the practice leaderboard's display
+// name and — until Phase 4 introduces real wallet-keyed identity — as the
+// Daily Grid's `identity_key`. Same caveat applies in both places: a raw,
+// unauthenticated string is spoofable/collidable (see the project's own
+// documented assessment of this limitation), which is exactly why grid
+// rewards are gated behind Phase 4 landing before anything of value attaches
+// to a `identity_key`.
+const NameSchema = z
+    .string()
+    .max(24)
+    .transform((s) => s.replace(/[^\x20-\x7E]/g, '').trim().slice(0, 16) || 'ANON');
+
 const SubmitSchema = z.object({
     token: z.string().min(8).max(64),
-    name: z
-        .string()
-        .max(24)
-        .transform((s) => s.replace(/[^\x20-\x7E]/g, '').trim().slice(0, 16) || 'ANON'),
+    name: NameSchema,
     wallet: z.string().max(64).optional(),
     ref: z.string().regex(/^[A-Za-z0-9_-]{1,24}$/).optional(),
     replay: ReplaySchema,
@@ -213,6 +223,112 @@ app.get('/api/milestone', async (c) => {
     const milestone = await getMilestone();
     c.header('Cache-Control', 'public, s-maxage=10, stale-while-revalidate=30');
     return c.json({ milestone });
+});
+
+// ---- Daily Grid (Phase 3) ----
+// Every player on an open grid plays the identical, publicly re-derivable seed.
+// A run only counts if it was played against a server-issued, grid-bound,
+// one-time ticket, and is re-simulated exactly like a practice run (see
+// verifyReplayEnvelope/simulate above) but checked against the TICKET's seed,
+// not a per-run random one.
+
+app.get('/api/grid/current', async (c) => {
+    const grid = await getCurrentGrid();
+    if (!grid) return c.json({ grid: null });
+    const [players] = await Promise.all([countVerifiedGridPlayers(grid.id)]);
+    c.header('Cache-Control', 'public, s-maxage=10, stale-while-revalidate=30');
+    return c.json({ grid, verifiedPlayers: players });
+});
+
+app.get('/api/grid/:id/leaderboard', async (c) => {
+    const gridId = c.req.param('id');
+    const limit = Math.min(Number(c.req.query('limit') || 100), 200);
+    const entries = await getGridLeaderboard(gridId, limit);
+    c.header('Cache-Control', 'public, s-maxage=10, stale-while-revalidate=30');
+    return c.json({ gridId, entries });
+});
+
+const TicketRequestSchema = z.object({ name: NameSchema, gridId: z.string().uuid() });
+
+app.post('/api/grid/ticket', async (c) => {
+    const ip = ipOf(c);
+    if (!(await rateLimit(ip, 'grid-ticket', 20, 60))) return c.json({ error: 'rate_limited' }, 429);
+    const parsed = TicketRequestSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
+    const result = await issueTicket(parsed.data.name, parsed.data.gridId);
+    if ('rejected' in result) return c.json({ error: result.rejected }, 409);
+    return c.json({ ticket: result.ticket });
+});
+
+const GridSubmitSchema = z.object({
+    ticketId: z.string().uuid(),
+    name: NameSchema,
+    replay: ReplaySchema,
+});
+
+app.post('/api/grid/submit', async (c) => {
+    const ip = ipOf(c);
+    if (!(await rateLimit(ip, 'grid-submit', 30, 60))) return c.json({ error: 'rate_limited' }, 429);
+
+    const parsed = GridSubmitSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
+    const b = parsed.data;
+    const replay = b.replay as RunReplay;
+
+    const ticket = await consumeTicket(b.ticketId);
+    if (!ticket) return c.json({ error: 'invalid_or_expired_ticket' }, 400);
+
+    const rejection = verifyReplayEnvelope(replay, { serverSeed: ticket.seed as `0x${string}` });
+    if (rejection) {
+        await redis.incr(`verify:grid:rejected:${rejection}`);
+        return c.json({ error: rejection }, 400);
+    }
+
+    const inputs: InputEvent[] = replay.inputs.map((i) => ({ tick: i.tick, act: i.action as Act }));
+    const r = simulate(ticket.seed, inputs, replay.ticks);
+    const botFlag = botLike(inputs, r.endTick);
+    await redis.incr('verify:grid:accepted');
+    if (botFlag) await redis.incr('verify:grid:bot');
+
+    const durationMs = Math.round((r.endTick / 60) * 1000);
+    const suspicious = durationMs < 1500 || durationMs > MAX_RUN_MS || botFlag;
+    const deathCause = r.alive ? 'RUN ENDED (TIME LIMIT).' : r.deathCause;
+
+    const { isPersonalBest } = await recordGridRun({
+        gridId: ticket.grid_id,
+        ticketId: ticket.id,
+        identityKey: b.name,
+        distance: r.distance,
+        score: r.score,
+        maxCombo: r.maxCombo,
+        deathCause,
+        durationMs,
+        suspicious,
+        replayLen: replay.inputs.length,
+    });
+
+    if (suspicious) return c.json({ ok: true, hidden: true, gridId: ticket.grid_id });
+
+    return c.json({
+        ok: true,
+        gridId: ticket.grid_id,
+        rank: rankFor(r.distance),
+        distance: r.distance,
+        score: r.score,
+        deathCause,
+        isPersonalBest,
+    });
+});
+
+// Opens (or idempotently returns) the grid for a given day. Stands in for the
+// "authorised scheduler" until Phase 6's contract exists to open grids
+// on-chain; guarded the same way the other admin routes are.
+app.post('/api/admin/grid/open', async (c) => {
+    const key = process.env.ADMIN_KEY;
+    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const dayId = c.req.query('dayId');
+    const grid = await openGrid(dayId || undefined);
+    return c.json({ ok: true, grid });
 });
 
 // Rebuild every leaderboard from Postgres (source of truth), collapsing to one
