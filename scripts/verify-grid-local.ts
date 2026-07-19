@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { privateKeyToAccount, generatePrivateKey } from 'viem/accounts';
 import { buildSiweMessage } from '../src/wallet/siwe.ts';
+import { verifyGhostReplay } from '../src/sim/ghost.ts';
 import { SimRunner } from '../src/sim/runner.ts';
 import { Act } from '../src/sim/sim.ts';
 import { REPLAY_SCHEMA_VERSION, type RunReplay } from '../src/sim/replay.ts';
@@ -135,8 +136,49 @@ async function main() {
     };
     console.log('own status poll:', JSON.stringify(statusRes));
 
-    const ok = statusRes.ok && statusRes.status === submitRes.status && statusRes.isPersonalBest === true;
-    console.log(ok ? '\n✅ WALLET + GRID + RECEIPT-STATUS LOOP WORKS\n' : '\n⚠️ unexpected result — check server logs\n');
+    const statusOk = statusRes.ok && statusRes.status === submitRes.status && statusRes.isPersonalBest === true;
+
+    // 5. Fetch the grid's ghost (this run just became the leader) and verify the
+    // served trace independently: recompute the replay hash from the raw bytes
+    // and confirm it matches what the server claims (Phase 9's core property).
+    const ghostRes = (await (await api(`/api/grid/${openRes.grid.id}/ghost`)).json()) as {
+        ok?: boolean;
+        ghost?: { identityKey: string; distance: number; replayHash: `0x${string}`; seed: `0x${string}`; inputs: number[]; ticks: number };
+    };
+    if (!ghostRes.ok || !ghostRes.ghost) throw new Error('ghost fetch failed');
+    const verified = verifyGhostReplay(ghostRes.ghost.inputs, ghostRes.ghost.ticks, ghostRes.ghost.replayHash);
+    const ghostOk =
+        verified !== null &&
+        ghostRes.ghost.seed === ticketRes.ticket.seed &&
+        ghostRes.ghost.identityKey === `677:${account.address.toLowerCase()}`;
+    console.log(
+        `ghost: leader=${ghostRes.ghost.identityKey} distance=${ghostRes.ghost.distance} hashVerified=${verified !== null}`,
+    );
+
+    // 6. The copy attack, for real: take the ghost's now-public input log and
+    // resubmit it verbatim through a fresh ticket. Must be rejected.
+    const ticket2 = (await (await api('/api/grid/ticket', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gridId: openRes.grid.id }),
+    })).json()) as { ticket?: { id: string; seed: `0x${string}` } };
+    if (!ticket2.ticket) throw new Error('second ticket request failed');
+    const copiedReplay: RunReplay = { ...replay, runId: ticket2.ticket.id };
+    const copyRes = await api('/api/grid/submit', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ticketId: ticket2.ticket.id, replay: copiedReplay }),
+    });
+    const copyBody = (await copyRes.json()) as { error?: string };
+    const copyRejected = copyRes.status === 409 && copyBody.error === 'duplicate_replay';
+    console.log('copy attack:', copyRes.status, JSON.stringify(copyBody));
+
+    const ok = statusOk && ghostOk && copyRejected;
+    console.log(
+        ok
+            ? '\n✅ WALLET + GRID + RECEIPT-STATUS + VERIFIED-GHOST + ANTI-COPY LOOP WORKS\n'
+            : '\n⚠️ unexpected result — check server logs\n',
+    );
 }
 
 void main();

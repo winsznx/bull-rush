@@ -6,6 +6,7 @@ export function Hud() {
     const dashPct = useGameStore((s) => s.dashPct);
     const combo = useGameStore((s) => s.combo);
     const shield = useGameStore((s) => s.shield);
+    const ghostDelta = useGameStore((s) => s.ghostDelta);
 
     return (
         <div className="hud">
@@ -23,6 +24,13 @@ export function Hud() {
             </div>
 
             {combo > 1 && <div className="combo">COMBO ×{combo}</div>}
+
+            {ghostDelta !== null && (
+                <div className={`ghost-chip ${ghostDelta >= 0 ? 'ahead' : 'behind'}`}>
+                    {ghostDelta >= 0 ? '▲' : '▼'} GHOST {ghostDelta >= 0 ? '+' : '−'}
+                    {Math.abs(Math.round(ghostDelta)).toLocaleString()}m
+                </div>
+            )}
 
             <div className="dash-wrap">
                 <div className="dash-bar">

@@ -1,7 +1,8 @@
 // Thin client for the Daily Grid endpoints. Same offline-safe posture as api.ts:
 // every call degrades to null on failure rather than throwing.
 import { activeSim } from './sim/active';
-import { REPLAY_SCHEMA_VERSION, type RunReplay } from './sim/replay';
+import { verifyGhostReplay } from './sim/ghost';
+import { REPLAY_SCHEMA_VERSION, type ReplayInput, type RunReplay } from './sim/replay';
 import { GAME_VERSION, RULESET_HASH } from './sim/ruleset';
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') || '';
@@ -114,6 +115,44 @@ export async function submitGridRun(ticketId: string): Promise<GridSubmitResult 
         if (!d) return null;
         if ('error' in d) return { ok: false, rejected: d.error };
         return d;
+    } catch {
+        return null;
+    }
+}
+
+export interface GridGhost {
+    identityKey: string;
+    distance: number;
+    replayHash: `0x${string}`;
+    seed: `0x${string}`;
+    inputs: ReplayInput[];
+    ticks: number;
+}
+
+// Fetches a grid's ghost (the leader's best verified replay, or the caller's own
+// with self=true) and VERIFIES it client-side: the raw trace is re-hashed locally
+// and must match the hash the server claims — the same hash receipted on-chain.
+// A ghost that fails verification is treated as no ghost at all.
+export async function getGridGhost(gridId: string, self = false): Promise<GridGhost | null> {
+    if (!BASE) return null;
+    try {
+        const r = await fetch(`${BASE}/api/grid/${gridId}/ghost${self ? '?self=1' : ''}`, { credentials: 'include' });
+        if (!r.ok) return null;
+        const d = (await r.json().catch(() => null)) as {
+            ok?: boolean;
+            ghost?: { identityKey: string; distance: number; replayHash: `0x${string}`; seed: `0x${string}`; inputs: number[]; ticks: number };
+        } | null;
+        if (!d?.ok || !d.ghost) return null;
+        const verified = verifyGhostReplay(d.ghost.inputs, d.ghost.ticks, d.ghost.replayHash);
+        if (!verified) return null;
+        return {
+            identityKey: d.ghost.identityKey,
+            distance: d.ghost.distance,
+            replayHash: d.ghost.replayHash,
+            seed: d.ghost.seed,
+            inputs: verified.inputs,
+            ticks: verified.ticks,
+        };
     } catch {
         return null;
     }

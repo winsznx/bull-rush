@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useGameStore } from '../store';
+import { buildGhostTrace } from '../sim/ghost';
 import { useAuth } from '../wallet/useAuth';
-import { getCurrentGrid, getGridLeaderboard, requestGridTicket, type GridInfo, type GridLbEntry } from '../gridApi';
+import { getCurrentGrid, getGridLeaderboard, getGridGhost, requestGridTicket, type GridInfo, type GridLbEntry } from '../gridApi';
 
 function fmtCountdown(ms: number): string {
     if (ms <= 0) return 'now';
@@ -42,7 +43,7 @@ export function DailyGrid() {
         };
     }, []);
 
-    const enter = async () => {
+    const enter = async (raceLeader = false) => {
         if (!grid) return;
         if (!session.authenticated) {
             await signIn();
@@ -50,13 +51,26 @@ export function DailyGrid() {
         }
         setRequesting(true);
         setRejection(null);
+
+        // Fetch + verify the leader's ghost BEFORE burning a ticket, so a failed
+        // ghost fetch degrades to a normal run instead of wasting the attempt.
+        // getGridGhost re-hashes the trace locally and refuses a mismatch.
+        let ghost = null;
+        if (raceLeader) {
+            const g = await getGridGhost(grid.id);
+            if (g && g.seed === grid.seed) {
+                const trace = buildGhostTrace(g.seed, g.inputs, g.ticks);
+                ghost = { ...trace, label: truncateAddress(g.identityKey.split(':')[1] ?? g.identityKey) };
+            }
+        }
+
         const result = await requestGridTicket(grid.id);
         setRequesting(false);
         if (!result.ok) {
             setRejection(result.reason);
             return;
         }
-        startGridRun(result.seed, result.ticketId, grid.id);
+        startGridRun(result.seed, result.ticketId, grid.id, ghost ?? undefined);
     };
 
     const myIdentityKey = session.authenticated && session.wallet && session.chainId ? `${session.chainId}:${session.wallet}` : null;
@@ -121,6 +135,11 @@ export function DailyGrid() {
                         <button className="btn primary" onClick={() => void enter()} disabled={busy || !grid.isOpenForTickets}>
                             {buttonLabel()}
                         </button>
+                        {board.length > 0 && session.authenticated && (
+                            <button className="btn share" onClick={() => void enter(true)} disabled={busy || !grid.isOpenForTickets}>
+                                RACE THE LEADER&apos;S GHOST ▸
+                            </button>
+                        )}
                     </>
                 )}
                 <button className="btn ghost" onClick={reset}>

@@ -55,7 +55,9 @@ export function hashCanonical(value: unknown): `0x${string}` {
 
 // The hash a verifier checks a submitted replay's `inputs`+`ticks` against, so a
 // truncated or reordered log can be detected before spending a re-simulation.
-export function replayHash(replay: RunReplay): `0x${string}` {
+// Takes only the two fields it hashes, so a ghost verifier holding just a raw
+// trace (no full RunReplay envelope) computes the identical value.
+export function replayHash(replay: Pick<RunReplay, 'inputs' | 'ticks'>): `0x${string}` {
     return hashCanonical({ inputs: replay.inputs, ticks: replay.ticks });
 }
 

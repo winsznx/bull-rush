@@ -23,7 +23,7 @@ import {
 import { rankFor } from './ranks.ts';
 import { simulate, type Act, type InputEvent } from './sim/sim.ts';
 import { verifyReplayEnvelope } from './sim/verify.ts';
-import { REPLAY_SCHEMA_VERSION, replayHash, type RunReplay } from './sim/replay.ts';
+import { REPLAY_SCHEMA_VERSION, replayHash, encodeInputsFlat, type RunReplay } from './sim/replay.ts';
 import { GAME_VERSION, RULESET_HASH } from './sim/ruleset.ts';
 import {
     openGrid,
@@ -35,6 +35,8 @@ import {
     getGridLeaderboard,
     countVerifiedGridPlayers,
     sweepExpiredTickets,
+    gridHasReplayHash,
+    getGridGhost,
 } from './grid.ts';
 import { listChainJobs } from './chain/outbox.ts';
 import { drainJobs, startRelayerLoop } from './chain/relayer.ts';
@@ -449,21 +451,45 @@ app.post('/api/grid/submit', async (c) => {
     const suspicious = durationMs < 1500 || durationMs > MAX_RUN_MS || botFlag;
     const deathCause = r.alive ? 'RUN ENDED (TIME LIMIT).' : r.deathCause;
 
-    const { id: verifiedRunId, isPersonalBest, status } = await recordVerifiedRun({
-        gridId: ticket.grid_id,
-        ticketId: ticket.id,
-        identityKey,
-        player: session.walletAddress as `0x${string}`,
-        gameVersion: ticket.game_version,
-        replayHash: replayHash(replay),
-        distance: r.distance,
-        score: r.score,
-        maxCombo: r.maxCombo,
-        deathCause,
-        durationMs,
-        suspicious,
-        replayLen: replay.inputs.length,
-    });
+    // Ghost replays are public by design (racing one means downloading its input
+    // log), and everyone in a grid shares one seed — so an exact copy of another
+    // player's log would re-simulate to their result. One replay per grid, period:
+    // friendly pre-check here, atomic unique index (migration 0007) under a race.
+    const rh = replayHash(replay);
+    if (await gridHasReplayHash(ticket.grid_id, rh)) {
+        await redis.incr('verify:grid:rejected:duplicate_replay');
+        return c.json({ error: 'duplicate_replay' }, 409);
+    }
+
+    let recorded;
+    try {
+        recorded = await recordVerifiedRun({
+            gridId: ticket.grid_id,
+            ticketId: ticket.id,
+            identityKey,
+            player: session.walletAddress as `0x${string}`,
+            gameVersion: ticket.game_version,
+            replayHash: rh,
+            replayTicks: replay.ticks,
+            replayInputsFlat: encodeInputsFlat(replay.inputs),
+            distance: r.distance,
+            score: r.score,
+            maxCombo: r.maxCombo,
+            deathCause,
+            durationMs,
+            suspicious,
+            replayLen: replay.inputs.length,
+        });
+    } catch (err) {
+        // Two identical submissions raced past the pre-check; the unique index
+        // caught the loser. Same outcome as the friendly path.
+        if ((err as { code?: string }).code === '23505') {
+            await redis.incr('verify:grid:rejected:duplicate_replay');
+            return c.json({ error: 'duplicate_replay' }, 409);
+        }
+        throw err;
+    }
+    const { id: verifiedRunId, isPersonalBest, status } = recorded;
 
     // A suspicious run is shadow-hidden entirely — no runId, no status to poll —
     // so a cheater sees nothing distinguishing it from a normal accepted run
@@ -494,6 +520,26 @@ app.get('/api/grid/run/:id/status', async (c) => {
     const view = await getVerifiedRunStatus(c.req.param('id'), identityKey);
     if (!view) return c.json({ error: 'not_found' }, 404);
     return c.json({ ok: true, ...view });
+});
+
+// The grid leader's best verified replay (or the caller's own with ?self=1) —
+// what the client re-simulates locally to race a ghost. Public for the leader:
+// the leaderboard already exposes who leads, and the replay's public nature is
+// by design (see the duplicate_replay gate in the submit handler). The response
+// includes replayHash so the client can independently recompute and verify the
+// trace hashes to the exact value that gets receipted on-chain.
+app.get('/api/grid/:id/ghost', async (c) => {
+    const ip = ipOf(c);
+    if (!(await rateLimit(ip, 'grid-ghost', 30, 60))) return c.json({ error: 'rate_limited' }, 429);
+    let identityKey: string | undefined;
+    if (c.req.query('self') === '1') {
+        const session = await requireGridSession(c);
+        if (!session) return c.json({ error: 'not_authenticated' }, 401);
+        identityKey = `${session.chainId}:${session.walletAddress}`;
+    }
+    const ghost = await getGridGhost(c.req.param('id'), identityKey);
+    if (!ghost) return c.json({ error: 'no_ghost_available' }, 404);
+    return c.json({ ok: true, ghost });
 });
 
 // Opens (or idempotently returns) the grid for a given day. Stands in for the

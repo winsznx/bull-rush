@@ -566,4 +566,54 @@ practice path; this one covers wallet + Daily Grid + receipt status).
 full interactive browser verification of the receipt UI during live gameplay (sandbox WebGL
 limitation; the underlying data flow was instead proven via a real HTTP round-trip).
 
+## Phase 9 — Verified ghost races
+
+The payoff of determinism: race the *actual, provably real* run of another player. Every grid
+shares one seed and every result is a hash-receipted replay, so a ghost is a local re-simulation
+of the exact input trace the leaderboard entry is bound to — verified by the racer's own machine,
+not taken on faith.
+
+**Server**: migration `0007_verified_run_replays.sql` adds `verified_runs.replay` jsonb (the
+canonical flat-encoded trace, stored for every recorded run — risk_hold rows included, for Phase
+12's manual review) and a `UNIQUE (grid_id, replay_hash)` index. `recordVerifiedRun` stores the
+trace and was reordered so the INSERT (the atomic anti-copy gate) precedes the Redis leaderboard
+write — a racing duplicate can no longer touch the board and then fail to persist. New
+`getGridGhost(gridId, identityKey?)` + `GET /api/grid/:id/ghost` (leader by default, `?self=1`
+session-scoped). Submit handler rejects `duplicate_replay` (409): friendly pre-check
+(`gridHasReplayHash`) + 23505 catch for the true race.
+
+**Why the anti-copy gate exists**: ghost replays are necessarily public (racing one means
+downloading its input log) and the seed is shared, so a verbatim copy through a fresh ticket
+would re-simulate to the original's exact result. Exact copies are now database-rejected; a
+*perturbed* copy evades the exact-hash check by construction — near-duplicate detection is
+input-trace similarity analysis, explicitly deferred to Phase 11's behavioral-signals layer.
+
+**Client**: `src/sim/ghost.ts` (deliberately NOT in the sim:sync set — pure presentation):
+`buildGhostTrace` pre-computes the ghost's full per-tick position trace through the same
+deterministic sim; `verifyGhostReplay` re-hashes the served bytes and refuses a mismatch.
+`replayHash`'s signature narrowed to `Pick<RunReplay, 'inputs' | 'ticks'>` so a trace-only
+verifier provably computes the identical value. `gridApi.getGridGhost` verifies before
+returning. `DailyGrid` gains "RACE THE LEADER'S GHOST ▸" (ghost fetched BEFORE the ticket so a
+failed fetch never wastes one; seed mismatch = no ghost). `SimScene` renders a translucent cyan
+phantom placed at the player's CURRENT tick (lockstep, not wall-clock); `Hud` shows the live gap
+(`▲ GHOST +12m` / `▼ GHOST −8m`).
+
+**Testing — genuinely run:**
+- `src/sim/ghost.test.ts` (8): trace ends exactly where `simulate()` says, deterministic,
+  monotonic; hash verification rejects tampered/truncated/wrong-ticks traces.
+- Integration (+3, real Postgres+Redis): leader ghost re-hashes to the stored hash; self ghost;
+  no-runs → no ghost; full anti-copy: pre-check true, copier's insert rejected 23505, copier
+  never on the leaderboard.
+- **Live over real HTTP** (`npm run local:verify:grid`): real SIWE sign-in → real run → ghost
+  fetched and hash-verified locally (`hashVerified=true`) → **the actual copy attack mounted**
+  (ghost's public log resubmitted verbatim through a fresh ticket) → `409 duplicate_replay`.
+- Fresh-DB proof: wiped volume, all 7 migrations from nothing, 21/21 integration; 0007 also
+  proven against the populated local DB (its dedup step cleared old same-hash fixtures first).
+- Full regression: `tsc --noEmit` clean both packages; `sim:check` clean; `npm test` 64/64 (+8);
+  `sim:test` 35/35 (+8), cross-process fingerprint unchanged; full `npm run build`.
+
+**Not done in Phase 9** (see ADR 0009): near-duplicate (perturbed-copy) detection (Phase 11), a
+client race-your-own-best button (server path exists and is tested; UI deferred), and any ghost
+for practice runs (ghosts are grid-only by definition — only grid runs are verified).
+
 <!-- Append future phase entries below this line, in commit order. -->

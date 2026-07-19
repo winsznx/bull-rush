@@ -11,6 +11,7 @@ import type { Address } from 'viem';
 import { sql } from './db.ts';
 import { redis } from './redis.ts';
 import { dayIdFor, deriveGridSeed, gridWindowFor } from './sim/grid.ts';
+import { REPLAY_SCHEMA_VERSION } from './sim/replay.ts';
 import { GAME_VERSION, RULESET_HASH } from './sim/ruleset.ts';
 import { canTransitionTicket, type VerifiedRunStatus } from './stateMachines.ts';
 import { enqueueChainJob } from './chain/outbox.ts';
@@ -216,6 +217,10 @@ export interface RecordVerifiedRunParams {
     player: Address;
     gameVersion: string;
     replayHash: `0x${string}`;
+    // The canonical trace itself (flat [tick, action, ...] encoding + tick count),
+    // persisted so ghosts can be served from it and any run re-verified later.
+    replayTicks: number;
+    replayInputsFlat: number[];
     distance: number;
     score: number;
     maxCombo: number;
@@ -247,27 +252,27 @@ export async function recordVerifiedRun(p: RecordVerifiedRunParams): Promise<Rec
     if (!p.suspicious) {
         const prevBest = await redis.zscore(LB_GRID(p.gridId), p.identityKey);
         isPersonalBest = prevBest === null || p.distance > Number(prevBest);
-        if (isPersonalBest) await redis.zadd(LB_GRID(p.gridId), 'GT', p.distance, p.identityKey);
     }
 
+    // INSERT before the Redis leaderboard write: the (grid_id, replay_hash) unique
+    // index is the atomic anti-copy gate (migration 0007), and it must reject a
+    // duplicate BEFORE anything touches the leaderboard — otherwise a racing
+    // copied replay could land on the board and only then fail to persist.
     await sql`
-        INSERT INTO verified_runs ${sql({
-            id,
-            grid_id: p.gridId,
-            ticket_id: p.ticketId,
-            identity_key: p.identityKey,
-            game_version: p.gameVersion,
-            replay_hash: p.replayHash,
-            distance: p.distance,
-            score: p.score,
-            max_combo: p.maxCombo,
-            death_cause: p.deathCause,
-            duration_ms: p.durationMs,
-            is_personal_best: isPersonalBest,
-            replay_len: p.replayLen,
-            status: p.suspicious ? 'risk_hold' : 'verified',
-        })}
+        INSERT INTO verified_runs (
+            id, grid_id, ticket_id, identity_key, game_version, replay_hash, replay,
+            distance, score, max_combo, death_cause, duration_ms, is_personal_best, replay_len, status
+        ) VALUES (
+            ${id}, ${p.gridId}, ${p.ticketId}, ${p.identityKey}, ${p.gameVersion}, ${p.replayHash},
+            ${sql.json({ v: REPLAY_SCHEMA_VERSION, ticks: p.replayTicks, inputs: p.replayInputsFlat })},
+            ${p.distance}, ${p.score}, ${p.maxCombo}, ${p.deathCause}, ${p.durationMs},
+            ${isPersonalBest}, ${p.replayLen}, ${p.suspicious ? 'risk_hold' : 'verified'}
+        )
     `;
+
+    // ZADD GT: only a strictly greater distance ever wins, so a stale
+    // isPersonalBest read above can never regress the board under concurrency.
+    if (isPersonalBest) await redis.zadd(LB_GRID(p.gridId), 'GT', p.distance, p.identityKey);
 
     let status: VerifiedRunStatus = p.suspicious ? 'risk_hold' : 'verified';
 
@@ -327,4 +332,58 @@ export async function getGridLeaderboard(gridId: string, limit: number): Promise
 
 export async function countVerifiedGridPlayers(gridId: string): Promise<number> {
     return redis.zcard(LB_GRID(gridId));
+}
+
+// Friendly-path pre-check for the submit handler; the (grid_id, replay_hash)
+// unique index (migration 0007) remains the atomic gate under a true race.
+export async function gridHasReplayHash(gridId: string, replayHash: `0x${string}`): Promise<boolean> {
+    const rows = await sql`SELECT 1 FROM verified_runs WHERE grid_id = ${gridId} AND replay_hash = ${replayHash} LIMIT 1`;
+    return rows.length > 0;
+}
+
+export interface GhostView {
+    identityKey: string;
+    distance: number;
+    score: number;
+    replayHash: `0x${string}`;
+    gameVersion: string;
+    seed: `0x${string}`;
+    ticks: number;
+    inputs: number[]; // flat [tick, action, ...] encoding (src/sim/replay.ts)
+}
+
+// The best non-risk-hold run for an identity on this grid, replay included — what
+// a client re-simulates locally to race against. `identityKey` omitted = the
+// current leaderboard leader. Serving the replay is deliberate and public: racing
+// a ghost means downloading its input log, and the anti-copy protection is the
+// per-grid replay-hash uniqueness at submit time, not secrecy of the trace.
+export async function getGridGhost(gridId: string, identityKey?: string): Promise<GhostView | null> {
+    let key = identityKey ?? null;
+    if (!key) {
+        const [top] = await getGridLeaderboard(gridId, 1);
+        if (!top) return null;
+        key = top.identityKey;
+    }
+    const [row] = await sql<
+        { identity_key: string; distance: number; score: number; replay_hash: string; game_version: string; replay: { v: number; ticks: number; inputs: number[] } | null; seed: string }[]
+    >`
+        SELECT vr.identity_key, vr.distance, vr.score, vr.replay_hash, vr.game_version, vr.replay, dg.seed
+        FROM verified_runs vr
+        JOIN daily_grids dg ON dg.id = vr.grid_id
+        WHERE vr.grid_id = ${gridId} AND vr.identity_key = ${key}
+          AND vr.status <> 'risk_hold' AND vr.replay IS NOT NULL
+        ORDER BY vr.distance DESC
+        LIMIT 1
+    `;
+    if (!row || !row.replay) return null;
+    return {
+        identityKey: row.identity_key,
+        distance: row.distance,
+        score: row.score,
+        replayHash: row.replay_hash as `0x${string}`,
+        gameVersion: row.game_version,
+        seed: row.seed as `0x${string}`,
+        ticks: row.replay.ticks,
+        inputs: row.replay.inputs,
+    };
 }

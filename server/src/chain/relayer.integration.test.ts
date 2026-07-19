@@ -158,6 +158,8 @@ describe('relayer + indexer (real anvil chain, real Phase 6 contracts)', () => {
             player,
             gameVersion: GAME_VERSION,
             replayHash,
+            replayTicks: 600,
+            replayInputsFlat: [10, 1, 30, 2, 55, 0],
             distance: 777,
             score: 777,
             maxCombo: 3,

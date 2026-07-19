@@ -25,6 +25,7 @@ export function SimScene() {
     const br = useRef<THREE.Group>(null);
     const runT = useRef(0);
     const runnerRef = useRef<SimRunner | null>(null);
+    const ghostGroup = useRef<THREE.Group>(null);
     const [, setVersion] = useState(0);
     const rowSig = useRef(''); // detects when the visible obstacle set changes
 
@@ -115,7 +116,24 @@ export function SimScene() {
             refs.laneTarget = s.laneTarget;
 
             const dashPct = s.tick >= s.dashReadyAt ? 1 : Math.max(0, Math.min(1, 1 - (s.dashReadyAt - s.tick) / DASH_CD_TICKS));
-            useGameStore.setState({ score: runner.score, dist: runner.distance, dashPct, hearts: s.hearts, shield: s.shield, combo: s.combo });
+
+            // Ghost race: place the verified ghost at the SAME tick as the player
+            // (lockstep on the shared grid seed, not a wall-clock approximation).
+            // Past its endTick the ghost froze where its run ended.
+            const gh = refs.ghost;
+            let ghostDelta: number | null = null;
+            if (gh) {
+                const gt = Math.min(s.tick, gh.endTick);
+                ghostDelta = runner.distance - gh.dists[gt];
+                if (ghostGroup.current) {
+                    ghostGroup.current.position.set(gh.xs[gt], 0, -gh.dists[gt]);
+                    ghostGroup.current.visible = true;
+                }
+            } else if (ghostGroup.current) {
+                ghostGroup.current.visible = false;
+            }
+
+            useGameStore.setState({ score: runner.score, dist: runner.distance, dashPct, hearts: s.hearts, shield: s.shield, combo: s.combo, ghostDelta });
 
             for (const ev of runner.lastEvents) {
                 if (ev.type === 'dash') {
@@ -234,6 +252,23 @@ export function SimScene() {
                     <meshStandardMaterial color="#39e6ff" emissive="#39e6ff" emissiveIntensity={1.2} toneMapped={false} />
                 </mesh>
             ))}
+
+            {/* verified ghost (Daily Grid races): translucent cyan phantom placed
+                per-tick from the pre-computed trace — never collides, never blocks */}
+            <group ref={ghostGroup} visible={false}>
+                <mesh position={[0, 1.45, 0.1]}>
+                    <boxGeometry args={[1.5, 1.25, 2.4]} />
+                    <meshBasicMaterial color="#39e6ff" transparent opacity={0.22} depthWrite={false} toneMapped={false} />
+                </mesh>
+                <mesh position={[0, 1.7, -1.4]}>
+                    <boxGeometry args={[0.9, 0.8, 0.9]} />
+                    <meshBasicMaterial color="#39e6ff" transparent opacity={0.22} depthWrite={false} toneMapped={false} />
+                </mesh>
+                <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.07, 0]}>
+                    <ringGeometry args={[0.78, 1.2, 32]} />
+                    <meshBasicMaterial color="#39e6ff" transparent opacity={0.4} depthWrite={false} toneMapped={false} />
+                </mesh>
+            </group>
 
             {/* obstacles from the sim's upcoming rows */}
             {rows.map((row) =>

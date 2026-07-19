@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import * as THREE from 'three';
 import { rankFor } from './data/ranks';
+import type { GhostTrace } from './sim/ghost';
 import { storage } from './storage';
 import { Audio } from './audio';
 
@@ -58,6 +59,9 @@ export const refs = {
     // random one, and GameOver.tsx submits via the grid endpoint, not practice.
     gridTicketId: null as string | null,
     gridId: null as string | null,
+    // A verified ghost to race (Daily Grid only): the pre-computed per-tick trace
+    // of another verified run on this same seed. Read by SimScene each frame.
+    ghost: null as (GhostTrace & { label: string }) | null,
 };
 
 export function resetRefs(): void {
@@ -77,6 +81,7 @@ export function resetRefs(): void {
     refs.token = null;
     refs.gridTicketId = null;
     refs.gridId = null;
+    refs.ghost = null;
 }
 
 export function laneFromX(x: number): number {
@@ -102,6 +107,9 @@ interface GameState {
     shield: boolean;
     combo: number;
     result: RunResult | null;
+    // Live gap to the racing ghost (player distance - ghost distance at the same
+    // tick); null when no ghost is loaded. Written by SimScene each frame.
+    ghostDelta: number | null;
     runId: number;
     flashKey: number;
     cloudKey: number;
@@ -115,7 +123,7 @@ interface GameState {
     openBoard: () => void;
     openGridScreen: () => void;
     start: () => void;
-    startGridRun: (seed: `0x${string}`, ticketId: string, gridId: string) => void;
+    startGridRun: (seed: `0x${string}`, ticketId: string, gridId: string, ghost?: GhostTrace & { label: string }) => void;
     reset: () => void;
     tick: (scoreDelta: number, dist: number, dashPct: number) => void;
     addScore: (n: number) => void;
@@ -138,6 +146,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     shield: false,
     combo: 0,
     result: null,
+    ghostDelta: null,
     runId: 0,
     flashKey: 0,
     cloudKey: 0,
@@ -160,17 +169,18 @@ export const useGameStore = create<GameState>((set, get) => ({
     openGridScreen: () => set({ phase: 'grid' }),
     start: () => {
         resetRefs();
-        set((s) => ({ phase: 'playing', hearts: HEALTH_MAX, score: 0, dist: 0, dashPct: 1, shield: false, combo: 0, result: null, runId: s.runId + 1 }));
+        set((s) => ({ phase: 'playing', hearts: HEALTH_MAX, score: 0, dist: 0, dashPct: 1, shield: false, combo: 0, result: null, ghostDelta: null, runId: s.runId + 1 }));
     },
     // A Daily Grid attempt: the seed is the ticket's (shared, fixed for the
     // grid), never a fresh random one — set atomically with the ticket/grid ids
     // so App.tsx's practice run-start effect knows to skip fetching its own.
-    startGridRun: (seed, ticketId, gridId) => {
+    startGridRun: (seed, ticketId, gridId, ghost) => {
         resetRefs();
         refs.seed = seed;
         refs.gridTicketId = ticketId;
         refs.gridId = gridId;
-        set((s) => ({ phase: 'playing', hearts: HEALTH_MAX, score: 0, dist: 0, dashPct: 1, shield: false, combo: 0, result: null, runId: s.runId + 1 }));
+        refs.ghost = ghost ?? null;
+        set((s) => ({ phase: 'playing', hearts: HEALTH_MAX, score: 0, dist: 0, dashPct: 1, shield: false, combo: 0, result: null, ghostDelta: null, runId: s.runId + 1 }));
     },
     reset: () => set({ phase: 'menu', result: null }),
     flashHit: () => set((s) => ({ flashKey: s.flashKey + 1 })),
