@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { sql } from './db.ts';
 import { runMigrations } from './migrate.ts';
 import { redis } from './redis.ts';
-import { openGrid, issueTicket, consumeTicket, recordVerifiedRun, getGridLeaderboard } from './grid.ts';
+import { openGrid, issueTicket, consumeTicket, recordVerifiedRun, getVerifiedRunStatus, getGridLeaderboard } from './grid.ts';
 import { GAME_VERSION } from './sim/ruleset.ts';
 
 beforeAll(async () => {
@@ -124,5 +124,91 @@ describe('Daily Grid lifecycle (real Postgres + Redis)', () => {
         const board = await getGridLeaderboard(grid.id, 10);
         const entry = board.find((r) => r.identityKey === identity);
         expect(entry?.distance).toBe(800); // the worse run never overwrote the best
+    });
+
+    it('a personal best starts at receipt_queued and is pollable by its own identity only', async () => {
+        const dayId = `test-${randomUUID()}`;
+        const grid = await openGrid(dayId);
+        await sql`UPDATE daily_grids SET opens_at = now() - interval '1 minute' WHERE id = ${grid.id}`;
+        const identity = `player-${randomUUID()}`;
+        const issued = await issueTicket(identity, grid.id);
+        if (!('ticket' in issued)) throw new Error('unreachable');
+
+        const { id, status } = await recordVerifiedRun({
+            gridId: grid.id,
+            ticketId: issued.ticket.id,
+            identityKey: identity,
+            player: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+            gameVersion: GAME_VERSION,
+            replayHash: `0x${'ab'.repeat(32)}` as `0x${string}`,
+            distance: 900,
+            score: 900,
+            maxCombo: 0,
+            deathCause: 'test',
+            durationMs: 1000,
+            suspicious: false,
+            replayLen: 10,
+        });
+        // a fresh personal best is enqueued for an on-chain receipt immediately —
+        // the relayer itself may not be running (CHAIN_RELAYER_ENABLED unset here),
+        // so it rests at receipt_queued, not further along.
+        expect(status).toBe('receipt_queued');
+
+        const own = await getVerifiedRunStatus(id, identity);
+        expect(own?.status).toBe('receipt_queued');
+        expect(own?.isPersonalBest).toBe(true);
+        expect(own?.receiptTxHash).toBeNull();
+
+        // #then a different identity cannot read this run's status
+        const stranger = await getVerifiedRunStatus(id, `player-${randomUUID()}`);
+        expect(stranger).toBeNull();
+    });
+
+    it('a non-personal-best run has no receipt to track and rests at verified', async () => {
+        const dayId = `test-${randomUUID()}`;
+        const grid = await openGrid(dayId);
+        await sql`UPDATE daily_grids SET opens_at = now() - interval '1 minute' WHERE id = ${grid.id}`;
+        const identity = `player-${randomUUID()}`;
+        // recordVerifiedRun doesn't consume the ticket itself (only the real
+        // HTTP handler's separate consumeTicket() call does) — one issued ticket
+        // is reused across both calls, matching the established pattern above.
+        const issued = await issueTicket(identity, grid.id);
+        if (!('ticket' in issued)) throw new Error('unreachable');
+        await recordVerifiedRun({
+            gridId: grid.id,
+            ticketId: issued.ticket.id,
+            identityKey: identity,
+            player: '0x3333333333333333333333333333333333333333' as `0x${string}`,
+            gameVersion: GAME_VERSION,
+            replayHash: `0x${'11'.repeat(32)}` as `0x${string}`,
+            distance: 900,
+            score: 900,
+            maxCombo: 0,
+            deathCause: 'test',
+            durationMs: 1000,
+            suspicious: false,
+            replayLen: 10,
+        });
+
+        const { id, status } = await recordVerifiedRun({
+            gridId: grid.id,
+            ticketId: issued.ticket.id,
+            identityKey: identity,
+            player: '0x3333333333333333333333333333333333333333' as `0x${string}`,
+            gameVersion: GAME_VERSION,
+            replayHash: `0x${'22'.repeat(32)}` as `0x${string}`,
+            distance: 400,
+            score: 400,
+            maxCombo: 0,
+            deathCause: 'test',
+            durationMs: 1000,
+            suspicious: false,
+            replayLen: 10,
+        });
+        expect(status).toBe('verified');
+
+        const view = await getVerifiedRunStatus(id, identity);
+        expect(view?.status).toBe('verified');
+        expect(view?.isPersonalBest).toBe(false);
     });
 });

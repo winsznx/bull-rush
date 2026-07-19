@@ -181,6 +181,20 @@ body,
     font-size: 13px;
     text-shadow: 0 0 12px rgba(57, 230, 255, 0.7);
 }
+.receipt-status {
+    color: #6b7688;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    font-size: 11px;
+}
+.receipt-status a {
+    color: var(--cyan);
+    text-decoration: none;
+    text-shadow: 0 0 10px rgba(57, 230, 255, 0.6);
+}
+.receipt-status a:hover {
+    text-decoration: underline;
+}
 
 /* ---------- Menu (hero) ---------- */
 .menu {

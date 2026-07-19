@@ -31,6 +31,7 @@ import {
     issueTicket,
     consumeTicket,
     recordVerifiedRun,
+    getVerifiedRunStatus,
     getGridLeaderboard,
     countVerifiedGridPlayers,
     sweepExpiredTickets,
@@ -448,7 +449,7 @@ app.post('/api/grid/submit', async (c) => {
     const suspicious = durationMs < 1500 || durationMs > MAX_RUN_MS || botFlag;
     const deathCause = r.alive ? 'RUN ENDED (TIME LIMIT).' : r.deathCause;
 
-    const { isPersonalBest } = await recordVerifiedRun({
+    const { id: verifiedRunId, isPersonalBest, status } = await recordVerifiedRun({
         gridId: ticket.grid_id,
         ticketId: ticket.id,
         identityKey,
@@ -464,17 +465,35 @@ app.post('/api/grid/submit', async (c) => {
         replayLen: replay.inputs.length,
     });
 
+    // A suspicious run is shadow-hidden entirely — no runId, no status to poll —
+    // so a cheater sees nothing distinguishing it from a normal accepted run
+    // silently not making the board, rather than an explicit "flagged" signal.
     if (suspicious) return c.json({ ok: true, hidden: true, gridId: ticket.grid_id });
 
     return c.json({
         ok: true,
         gridId: ticket.grid_id,
+        runId: verifiedRunId,
+        status,
         rank: rankFor(r.distance),
         distance: r.distance,
         score: r.score,
         deathCause,
         isPersonalBest,
     });
+});
+
+// Poll the on-chain receipt progress of one of the caller's own verified runs
+// (verified -> receipt_queued -> submitted -> confirmed). Only a personal-best
+// run ever leaves `verified` — a worse run has no receipt to track and this
+// will just keep returning `verified` forever, which is accurate, not stuck.
+app.get('/api/grid/run/:id/status', async (c) => {
+    const session = await requireGridSession(c);
+    if (!session) return c.json({ error: 'not_authenticated' }, 401);
+    const identityKey = `${session.chainId}:${session.walletAddress}`;
+    const view = await getVerifiedRunStatus(c.req.param('id'), identityKey);
+    if (!view) return c.json({ error: 'not_found' }, 404);
+    return c.json({ ok: true, ...view });
 });
 
 // Opens (or idempotently returns) the grid for a given day. Stands in for the

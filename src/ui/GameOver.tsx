@@ -2,9 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { useGameStore, refs } from '../store';
 import { storage } from '../storage';
 import { submitRun, buildReplay, shareLink, type SubmitResult } from '../api';
-import { submitGridRun, type GridSubmitResult } from '../gridApi';
+import { submitGridRun, getRunStatus, type GridSubmitResult, type RunStatusResult } from '../gridApi';
+import { explorerTx, BOT_CHAIN_MAINNET_ID } from '../wallet/chain';
 
 type AnyVerifiedResult = SubmitResult | GridSubmitResult;
+
+const RECEIPT_POLL_MS = 3000;
+const RECEIPT_POLL_MAX_ATTEMPTS = 40; // ~2 minutes
 
 export function GameOverScreen() {
     const result = useGameStore((s) => s.result);
@@ -18,6 +22,10 @@ export function GameOverScreen() {
     // Server-derived, canonical outcome of the verified run — never the locally-
     // guessed values. Only what's shown here is what actually counts globally.
     const [verified, setVerified] = useState<AnyVerifiedResult | null>(null);
+    // On-chain receipt progress for a Daily Grid personal best — polled after
+    // `verified` arrives; stays null for every other outcome (a non-personal-best
+    // verified run and a shadow-hidden suspicious run both have no receipt to track).
+    const [runStatus, setRunStatus] = useState<RunStatusResult | null>(null);
     const localId = useRef<string | null>(null);
     const submitted = useRef(false);
 
@@ -101,6 +109,38 @@ Every run is replay-verified. Same grid. Prove the run.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [result]);
 
+    // Only a Daily Grid personal best ever gets an on-chain job queued (see
+    // server/src/grid.ts) — every other outcome has no receipt to poll for.
+    const receiptRunId = verified && 'runId' in verified && verified.isPersonalBest ? (verified.runId ?? null) : null;
+
+    // Synchronizes with an external system (the server's on-chain receipt state) —
+    // polls until the receipt is confirmed or a bounded number of attempts pass.
+    useEffect(() => {
+        if (!receiptRunId) {
+            setRunStatus(null);
+            return;
+        }
+        let cancelled = false;
+        let attempts = 0;
+        let timer: ReturnType<typeof window.setTimeout>;
+
+        const poll = () => {
+            void getRunStatus(receiptRunId).then((res) => {
+                if (cancelled) return;
+                if (res) setRunStatus(res);
+                attempts += 1;
+                if (res?.status === 'confirmed' || attempts >= RECEIPT_POLL_MAX_ATTEMPTS) return;
+                timer = setTimeout(poll, RECEIPT_POLL_MS);
+            });
+        };
+        timer = setTimeout(poll, RECEIPT_POLL_MS);
+
+        return () => {
+            cancelled = true;
+            clearTimeout(timer);
+        };
+    }, [receiptRunId]);
+
     if (!result) return null;
     const cause = dCause ?? result.cause;
     const distance = dDistance ?? result.distance;
@@ -129,6 +169,23 @@ Every run is replay-verified. Same grid. Prove the run.
                 {globalPos && <div className="globalrank">GLOBAL&nbsp;#{globalPos.toLocaleString()}</div>}
                 {verified?.ok && 'isPersonalBest' in verified && verified.isPersonalBest && (
                     <div className="globalrank">NEW GRID PERSONAL BEST</div>
+                )}
+                {receiptRunId && runStatus && (
+                    <div className="receipt-status">
+                        {runStatus.status === 'confirmed' && runStatus.receiptTxHash ? (
+                            <a
+                                href={explorerTx(BOT_CHAIN_MAINNET_ID, runStatus.receiptTxHash)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                            >
+                                RECEIPT CONFIRMED ▸ VIEW ON BOTSCAN
+                            </a>
+                        ) : runStatus.status === 'submitted' ? (
+                            'RECEIPT SUBMITTED…'
+                        ) : (
+                            'RECEIPT QUEUED…'
+                        )}
+                    </div>
                 )}
                 {verified && !verified.ok && <div className="not-ready">RUN NOT VERIFIED{verified.rejected ? ` · ${verified.rejected}` : ''}</div>}
 

@@ -518,4 +518,52 @@ end-to-end test against real infrastructure):**
 no dead-letter alerting (list/manual-drain admin endpoints only), no transaction batching, no
 actual deployment anywhere (still Phase 15).
 
+## Phase 8 — End-of-run receipt-status UX
+
+Surfaces Phase 7's `verified -> receipt_queued -> submitted -> confirmed` progression to the
+player. Claim UX is explicitly NOT built — nothing claimable exists yet (no season, no funded
+vault, no Merkle tree; all Phase 10), and building a claim button against a fabricated
+entitlement would violate this project's standing rule against building UI for something that
+isn't genuinely real yet.
+
+**`server/src/grid.ts`** — `recordVerifiedRun` now returns `{ id, isPersonalBest, status }`
+instead of just `{ isPersonalBest }`; new `getVerifiedRunStatus(runId, identityKey)`,
+ownership-checked (filters on `identity_key` in the same query, not just an unguessable UUID).
+
+**`server/src/index.ts`** — submit response gains `runId`/`status` (only for a non-suspicious
+accepted run — a shadow-hidden run gets neither, preserving the existing silent-hide anti-cheat
+posture); new `GET /api/grid/run/:id/status`.
+
+**`src/gridApi.ts`** — `GridSubmitResult` gains `runId`/`status`; new `getRunStatus(runId)`.
+**`src/ui/GameOver.tsx`** — derives `receiptRunId` from `verified.isPersonalBest` +
+`verified.runId` (no receiptRunId, no polling — a non-personal-best run has nothing to watch);
+polls every 3s for up to ~2 minutes, showing RECEIPT QUEUED/SUBMITTED/CONFIRMED (with a BOTScan
+link on confirm) using `explorerTx`/`BOT_CHAIN_MAINNET_ID` from `src/wallet/chain.ts`. Polling is
+honestly bounded, not indefinite — matches Phase 7's own no-fabricated-finality posture.
+
+**`scripts/verify-grid-local.ts`** (new, `npm run local:verify:grid`) — a throwaway wallet signs
+a real SIWE message, verifies, opens a grid, requests a ticket, plays and submits a real
+deterministic run, and polls its own run's status against a live local server. Joins
+`scripts/verify-local.ts` as a committed, repeatable local E2E tool (that one covers the classic
+practice path; this one covers wallet + Daily Grid + receipt status).
+
+**Testing — genuinely run:**
+- `server/src/grid.integration.test.ts` — 2 new tests (real Postgres + Redis): a personal best
+  starts at `receipt_queued` and is pollable only by its own identity; a non-personal-best run
+  rests at `verified` with `isPersonalBest: false`.
+- **Real live HTTP round-trip** via `npm run local:verify:grid` against a running local server —
+  confirmed the submit response and the status-poll response agree exactly, with a genuine SIWE
+  signature and a genuine re-simulated run, no mocks anywhere in the path.
+- Headless-Chrome (CDP) bundle sanity check: the dev server's bundle (including the new
+  `wallet/chain.ts` import into `GameOver.tsx`) imports and React mounts without error; the run
+  only fails at Three.js's WebGL context creation, a headless-sandbox GPU limitation unrelated to
+  this change. Full interactive visual verification of the receipt UI mid-gameplay wasn't
+  possible in this sandbox — noted explicitly rather than claimed.
+- Full regression: `tsc --noEmit` clean both packages; `sim:sync`/`sim:check` clean; `npm test`
+  56/56 unchanged; `sim:test` 27/27 unchanged; `test:integration` 18/18 (+2); full `npm run build`.
+
+**Not done in Phase 8** (see ADR 0008): claim UX (Phase 10 — nothing claimable exists yet), and
+full interactive browser verification of the receipt UI during live gameplay (sandbox WebGL
+limitation; the underlying data flow was instead proven via a real HTTP round-trip).
+
 <!-- Append future phase entries below this line, in commit order. -->

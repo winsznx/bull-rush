@@ -12,7 +12,7 @@ import { sql } from './db.ts';
 import { redis } from './redis.ts';
 import { dayIdFor, deriveGridSeed, gridWindowFor } from './sim/grid.ts';
 import { GAME_VERSION, RULESET_HASH } from './sim/ruleset.ts';
-import { canTransitionTicket } from './stateMachines.ts';
+import { canTransitionTicket, type VerifiedRunStatus } from './stateMachines.ts';
 import { enqueueChainJob } from './chain/outbox.ts';
 import { toOnChainGridId, toOnChainRunId } from './chain/onchainIds.ts';
 
@@ -234,7 +234,13 @@ export interface RecordVerifiedRunParams {
 // Only a personal best is queued for an on-chain receipt (`receipt_queued`) — a
 // worse run has nothing new to attest to (the leaderboard already reflects the
 // better one) and isn't worth the relayer's gas.
-export async function recordVerifiedRun(p: RecordVerifiedRunParams): Promise<{ isPersonalBest: boolean }> {
+export interface RecordVerifiedRunResult {
+    id: string;
+    isPersonalBest: boolean;
+    status: VerifiedRunStatus;
+}
+
+export async function recordVerifiedRun(p: RecordVerifiedRunParams): Promise<RecordVerifiedRunResult> {
     const id = randomUUID();
     let isPersonalBest = false;
 
@@ -263,6 +269,8 @@ export async function recordVerifiedRun(p: RecordVerifiedRunParams): Promise<{ i
         })}
     `;
 
+    let status: VerifiedRunStatus = p.suspicious ? 'risk_hold' : 'verified';
+
     if (isPersonalBest) {
         const [grid] = await sql<{ day_id: string }[]>`SELECT day_id FROM daily_grids WHERE id = ${p.gridId}`;
         const onChainGridId = toOnChainGridId(grid.day_id);
@@ -280,10 +288,28 @@ export async function recordVerifiedRun(p: RecordVerifiedRunParams): Promise<{ i
         });
         if (enqueued) {
             await sql`UPDATE verified_runs SET status = 'receipt_queued' WHERE id = ${id} AND status = 'verified'`;
+            status = 'receipt_queued';
         }
     }
 
-    return { isPersonalBest };
+    return { id, isPersonalBest, status };
+}
+
+export interface VerifiedRunStatusView {
+    status: VerifiedRunStatus;
+    receiptTxHash: string | null;
+    isPersonalBest: boolean;
+}
+
+// Ownership-checked: a player can only poll their own run's on-chain receipt
+// progress, not enumerate anyone else's by id.
+export async function getVerifiedRunStatus(runId: string, identityKey: string): Promise<VerifiedRunStatusView | null> {
+    const [row] = await sql<{ status: VerifiedRunStatus; receipt_tx_hash: string | null; is_personal_best: boolean }[]>`
+        SELECT status, receipt_tx_hash, is_personal_best FROM verified_runs
+        WHERE id = ${runId} AND identity_key = ${identityKey}
+    `;
+    if (!row) return null;
+    return { status: row.status, receiptTxHash: row.receipt_tx_hash, isPersonalBest: row.is_personal_best };
 }
 
 export interface GridLbEntry {

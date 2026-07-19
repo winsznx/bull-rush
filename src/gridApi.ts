@@ -73,6 +73,8 @@ export async function requestGridTicket(gridId: string): Promise<TicketResult> {
     }
 }
 
+export type VerifiedRunStatus = 'received' | 'verifying' | 'verified' | 'risk_hold' | 'receipt_queued' | 'submitted' | 'confirmed';
+
 export interface GridSubmitResult {
     ok: boolean;
     rejected?: string;
@@ -82,6 +84,10 @@ export interface GridSubmitResult {
     score?: number;
     deathCause?: string;
     isPersonalBest?: boolean;
+    // Present only for a non-suspicious accepted run — a shadow-hidden run has
+    // no runId to poll, by design (see server/src/index.ts's submit handler).
+    runId?: string;
+    status?: VerifiedRunStatus;
 }
 
 export async function submitGridRun(ticketId: string): Promise<GridSubmitResult | null> {
@@ -108,6 +114,29 @@ export async function submitGridRun(ticketId: string): Promise<GridSubmitResult 
         if (!d) return null;
         if ('error' in d) return { ok: false, rejected: d.error };
         return d;
+    } catch {
+        return null;
+    }
+}
+
+export interface RunStatusResult {
+    status: VerifiedRunStatus;
+    receiptTxHash: string | null;
+    isPersonalBest: boolean;
+}
+
+// Polls the on-chain receipt progress of a run this session itself submitted
+// (server-side ownership-checked — see server/src/index.ts). Returns null on
+// any failure (network, not-found, not-authenticated) so a caller can treat
+// "no answer this tick" the same as "try again next tick" without special-casing.
+export async function getRunStatus(runId: string): Promise<RunStatusResult | null> {
+    if (!BASE) return null;
+    try {
+        const r = await fetch(`${BASE}/api/grid/run/${runId}/status`, { credentials: 'include' });
+        if (!r.ok) return null;
+        const d = (await r.json().catch(() => null)) as (RunStatusResult & { ok: true }) | null;
+        if (!d || !d.ok) return null;
+        return { status: d.status, receiptTxHash: d.receiptTxHash, isPersonalBest: d.isPersonalBest };
     } catch {
         return null;
     }
