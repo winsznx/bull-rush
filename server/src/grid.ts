@@ -7,11 +7,14 @@
 // stand-in for what Phase 4 (wallet + SIWE) will replace with a real
 // wallet-derived user key. See server/src/db.ts's schema comment.
 import { randomUUID } from 'node:crypto';
+import type { Address } from 'viem';
 import { sql } from './db.ts';
 import { redis } from './redis.ts';
 import { dayIdFor, deriveGridSeed, gridWindowFor } from './sim/grid.ts';
 import { GAME_VERSION, RULESET_HASH } from './sim/ruleset.ts';
 import { canTransitionTicket } from './stateMachines.ts';
+import { enqueueChainJob } from './chain/outbox.ts';
+import { toOnChainGridId, toOnChainRunId } from './chain/onchainIds.ts';
 
 const TICKET_TTL_SEC = 3600;
 
@@ -79,6 +82,25 @@ export async function openGrid(dayId: string = dayIdFor(new Date())): Promise<Gr
     `;
 
     const [row] = await sql<GridRow[]>`SELECT * FROM daily_grids WHERE day_id = ${dayId}`;
+
+    // Idempotent regardless of whether the row above was freshly inserted or already
+    // existed — enqueueChainJob's own idempotency_key uniqueness makes a repeat call
+    // harmless, so the indexing_state transition only fires the one time it actually
+    // enqueues (a guarded off_chain -> queued UPDATE, never regressing an already
+    // queued/submitted/confirmed grid).
+    const { enqueued } = await enqueueChainJob('open_grid', `open_grid:${dayId}`, {
+        dayId,
+        onChainGridId: toOnChainGridId(dayId),
+        seed: row.seed,
+        rulesetHash: row.ruleset_hash,
+        gameVersion: row.game_version,
+        opensAt: Math.floor(row.opens_at.getTime() / 1000),
+        closesAt: Math.floor(row.closes_at.getTime() / 1000),
+    });
+    if (enqueued) {
+        await sql`UPDATE daily_grids SET indexing_state = 'queued' WHERE day_id = ${dayId} AND indexing_state = 'off_chain'`;
+    }
+
     return toPublicView(row);
 }
 
@@ -191,6 +213,7 @@ export interface RecordVerifiedRunParams {
     gridId: string;
     ticketId: string;
     identityKey: string;
+    player: Address;
     gameVersion: string;
     replayHash: `0x${string}`;
     distance: number;
@@ -204,12 +227,13 @@ export interface RecordVerifiedRunParams {
 
 // Every verified attempt is recorded (history); only an improvement over the
 // identity's existing best on THIS grid updates the grid's leaderboard — a
-// worse run never overwrites a better one, and never needs to (there is no
-// on-chain receipt yet for this to needlessly re-trigger; Phase 6/7 will gate
-// receipt-queueing on this same `isPersonalBest` flag). `status` is set
+// worse run never overwrites a better one, and never needs to. `status` is set
 // directly to its resting state (`verified` or `risk_hold`) — this codebase
 // verifies synchronously in one request, so `received`/`verifying` are never
 // actually persisted, only legal per the state machine (server/src/stateMachines.ts).
+// Only a personal best is queued for an on-chain receipt (`receipt_queued`) — a
+// worse run has nothing new to attest to (the leaderboard already reflects the
+// better one) and isn't worth the relayer's gas.
 export async function recordVerifiedRun(p: RecordVerifiedRunParams): Promise<{ isPersonalBest: boolean }> {
     const id = randomUUID();
     let isPersonalBest = false;
@@ -238,6 +262,26 @@ export async function recordVerifiedRun(p: RecordVerifiedRunParams): Promise<{ i
             status: p.suspicious ? 'risk_hold' : 'verified',
         })}
     `;
+
+    if (isPersonalBest) {
+        const [grid] = await sql<{ day_id: string }[]>`SELECT day_id FROM daily_grids WHERE id = ${p.gridId}`;
+        const onChainGridId = toOnChainGridId(grid.day_id);
+        const runId = toOnChainRunId(onChainGridId, p.player, p.replayHash);
+
+        const { enqueued } = await enqueueChainJob('record_run', `record_run:${runId}`, {
+            verifiedRunId: id,
+            runId,
+            onChainGridId,
+            player: p.player,
+            replayHash: p.replayHash,
+            distance: p.distance,
+            score: p.score,
+            gameVersion: p.gameVersion,
+        });
+        if (enqueued) {
+            await sql`UPDATE verified_runs SET status = 'receipt_queued' WHERE id = ${id} AND status = 'verified'`;
+        }
+    }
 
     return { isPersonalBest };
 }

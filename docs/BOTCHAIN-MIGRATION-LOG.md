@@ -449,4 +449,73 @@ Phase 15 is the gated point where this is actually broadcast.
 contracts (Phase 7), no actual deployment to any network (Phase 15), no contract-driven grid
 scheduling automation (still an `onlyScheduler` EOA), no Merkle tree generation tooling (Phase 10).
 
+## Phase 7 — Relayer + chain indexer
+
+Wires the live server to Phase 6's contracts. Gameplay never touches the chain directly —
+`POST /api/grid/submit`/`POST /api/admin/grid/open` respond immediately; a durable outbox
+(`chain_jobs`, schema-ready since migration 0006) queues the on-chain write, and a separate
+relayer process drains it on its own schedule.
+
+**`server/src/chain/onchainIds.ts`** — `toOnChainGridId(dayId)` = `keccak256(dayId)` (keyed off
+the public calendar-day string, not the internal Postgres UUID, preserving ADR 0003's
+public-derivability property); `toOnChainRunId(gridId, player, replayHash)` per ADR 0006's
+recommended scheme.
+
+**`server/src/chain/outbox.ts`** — `enqueueChainJob` (idempotent via `ON CONFLICT
+(idempotency_key) DO NOTHING`), `claimNextJob` (atomic `FOR UPDATE SKIP LOCKED` dequeue),
+`markSubmitted`/`markConfirmed`/`markReverted`/`markAttemptFailed` (exponential backoff, parks as
+`failed` after 5 attempts). New `chain_job`/`daily_grids.indexing_state` state machines in
+`server/src/stateMachines.ts`, same database-enforced compare-and-set pattern as every prior
+phase's tables.
+
+**`server/src/chain/relayer.ts`** — `processOneJob`/`drainJobs`/`startRelayerLoop`. One
+transaction at a time, waiting for each receipt before claiming the next. `loadChainConfig()`
+(`server/src/chain/client.ts`) returns `null` unless `CHAIN_RELAYER_ENABLED=true` and every
+required env var is set — the relayer is a genuine no-op in every environment today, since
+nothing is deployed anywhere yet (Phase 15).
+
+**`server/src/chain/indexer.ts`** — `fetchGridOpenedEvents`/`fetchRunRecordedEvents`, read-only,
+independent of the relayer's own bookkeeping (what Phase 9's ghost races will read from).
+
+**`server/src/grid.ts`** — `openGrid()` enqueues an `open_grid` job and transitions
+`indexing_state` `off_chain -> queued`; `recordVerifiedRun()` enqueues a `record_run` job (only
+for a personal best — a worse run has nothing new to attest to on-chain) and transitions
+`verified_runs.status` `verified -> receipt_queued`. `server/src/index.ts` — new
+`GET /api/admin/chain-jobs` (list) and `POST /api/admin/chain-jobs/process` (manual bounded
+drain), same `ADMIN_KEY` guard as every other admin route; relayer loop started conditionally at
+boot.
+
+**Two real bugs found and fixed while building this (not by inspection — by writing a real
+end-to-end test against real infrastructure):**
+1. `hashCanonical` (`src/sim/replay.ts`) was still the Phase 2 32-bit FNV-1a fingerprint, exactly
+   as that phase's own comment flagged it would need upgrading once a contract actually encoded
+   these values as `bytes32`. Fixed to `keccak256(toHex(canonicalStringify(value)))` via viem —
+   a one-function change (per the original plan) fixing `RULESET_HASH`, Daily Grid seeds, and
+   `replayHash` at once. Confirmed no gameplay-determinism fallout (`sim:test`'s cross-process
+   fingerprint check unchanged) and no test relied on a specific literal hash value.
+2. `chain_jobs` has no per-deployment scoping (correct for production — one real relayer, one
+   real contract set) but let two integration test files (each deploying its own disposable
+   contracts to its own local anvil instance) cross-contaminate the shared queue when Vitest ran
+   them in parallel. Fixed via `fileParallelism: false` in `server/vitest.config.ts` (every
+   integration test file already shares one real Postgres/Redis) plus a `DELETE FROM chain_jobs`
+   at the start of the new relayer test's own `beforeAll`.
+
+**Testing — genuinely run, including a real local blockchain:**
+- `server/src/chain/onchainIds.test.ts` (8) + state-machine extensions (13) — pure, fast.
+- `server/src/chain/relayer.integration.test.ts` (4) — **real anvil**, deploying the actual
+  compiled Phase 6 bytecode from `contracts/out/*.json`: an `open_grid` job reaches `confirmed`
+  with `DailyGridRegistry.gridExists` true on-chain; a `record_run` job reaches `confirmed` with
+  `VerifiedRunRegistry.recorded` true on-chain; the indexer independently reads back both events;
+  double-enqueue never produces two rows. Run twice back-to-back to confirm the contamination fix
+  actually holds, not just passed once by luck.
+- Full regression: `tsc --noEmit` clean both packages; `sim:sync`/`sim:check` clean; `npm test`
+  56/56 (+7); `sim:test` 27/27 unchanged; `test:integration` 16/16 (+4) against a freshly-migrated
+  database; full `npm run build`; `forge test` 43/43 unchanged.
+- CI's `integration` job now installs the Foundry toolchain and runs `forge build` in
+  `contracts/` first (the relayer test spawns `anvil` and deploys from those artifacts directly).
+
+**Not done in Phase 7** (see ADR 0007): no confirmation-count/finality wait beyond one receipt,
+no dead-letter alerting (list/manual-drain admin endpoints only), no transaction batching, no
+actual deployment anywhere (still Phase 15).
+
 <!-- Append future phase entries below this line, in commit order. -->

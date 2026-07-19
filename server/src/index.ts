@@ -35,6 +35,9 @@ import {
     countVerifiedGridPlayers,
     sweepExpiredTickets,
 } from './grid.ts';
+import { listChainJobs } from './chain/outbox.ts';
+import { drainJobs, startRelayerLoop } from './chain/relayer.ts';
+import { loadChainConfig } from './chain/client.ts';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import {
     issueNonce,
@@ -449,6 +452,7 @@ app.post('/api/grid/submit', async (c) => {
         gridId: ticket.grid_id,
         ticketId: ticket.id,
         identityKey,
+        player: session.walletAddress as `0x${string}`,
         gameVersion: ticket.game_version,
         replayHash: replayHash(replay),
         distance: r.distance,
@@ -485,8 +489,9 @@ app.post('/api/admin/grid/open', async (c) => {
 });
 
 // Moves any run_tickets past their expiry from 'issued' to 'expired'. No
-// scheduler exists yet (Phase 6/7's relayer is the eventual real one);
-// operator-triggered in the interim, guarded the same way as other admin routes.
+// scheduler exists yet for this specific sweep (unrelated to the Phase 7 chain
+// relayer below, which only processes chain_jobs); operator-triggered in the
+// interim, guarded the same way as other admin routes.
 app.post('/api/admin/sweep-expired-tickets', async (c) => {
     const key = process.env.ADMIN_KEY;
     if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
@@ -553,6 +558,29 @@ app.post('/api/admin/flag-implausible', async (c) => {
         WHERE suspicious = false AND (distance > ${maxDistance} OR duration_ms > ${maxDurationMs})
         RETURNING name, distance, duration_ms`;
     return c.json({ ok: true, flagged: flagged.length, maxDistance, maxDurationMs, rows: flagged });
+});
+
+// Read-only visibility into the relayer's outbox — is anything stuck pending/failed?
+// (Phase 12/13 will add real alerting; this is the interim operator view.)
+app.get('/api/admin/chain-jobs', async (c) => {
+    const key = process.env.ADMIN_KEY;
+    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const limit = Math.max(1, Math.min(200, Number(c.req.query('limit')) || 50));
+    const jobs = await listChainJobs(limit);
+    return c.json({ ok: true, jobs });
+});
+
+// Manually drain up to `max` pending chain_jobs against the configured chain. A no-op
+// (400) if CHAIN_RELAYER_ENABLED isn't set — there is nothing deployed to relay to yet
+// in most environments; Phase 15 is the gated point where that changes.
+app.post('/api/admin/chain-jobs/process', async (c) => {
+    const key = process.env.ADMIN_KEY;
+    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const config = loadChainConfig();
+    if (!config) return c.json({ error: 'relayer_disabled' }, 400);
+    const max = Math.max(1, Math.min(50, Number(c.req.query('max')) || 10));
+    const processed = await drainJobs(config, max);
+    return c.json({ ok: true, processed });
 });
 
 // Dynamic OG share card — the bull image with this run's score burned in.
@@ -625,4 +653,13 @@ Charging into BULL RUSH… <a style="color:#39ff14" href="${esc(game)}">tap to p
 
 const port = Number(process.env.PORT || 8787);
 await assertMigrationsApplied();
+
+// No-op in every environment before Phase 15 deploys real contracts — loadChainConfig
+// returns null unless CHAIN_RELAYER_ENABLED=true and every required env var is set.
+const chainConfig = loadChainConfig();
+if (chainConfig) {
+    startRelayerLoop(chainConfig, 15_000);
+    console.log('chain relayer loop started (chainId', chainConfig.chainId, ')');
+}
+
 serve({ fetch: app.fetch, port }, (info) => console.log(`BULL RUSH API listening on :${info.port}`));

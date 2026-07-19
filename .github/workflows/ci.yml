@@ -57,7 +57,7 @@ jobs:
       - run: npm run typecheck
 
   integration:
-    name: grid + auth lifecycle (real Postgres + Redis)
+    name: grid + auth + relayer lifecycle (real Postgres + Redis + anvil)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -85,6 +85,11 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      # anvil (relayer.integration.test.ts spawns it directly) + forge (to build the
+      # contracts/out/*.json artifacts that same test deploys from).
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge build
+        working-directory: contracts
       - run: npm ci
       - run: cd server && npm ci
       - run: npm run db:migrate

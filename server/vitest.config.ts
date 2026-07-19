@@ -12,5 +12,14 @@ export default defineConfig({
         setupFiles: ['server/vitest.setup.ts'],
         environment: 'node',
         testTimeout: 15000,
+        // Vitest parallelizes across test FILES by default, but every file here
+        // already shares one real Postgres/Redis. That's fine for tests that only
+        // touch their own randomly-generated rows — but relayer.integration.test.ts
+        // drains the single shared chain_jobs queue, which has no per-deployment
+        // scoping (matching production, where there is only ever one real relayer
+        // target). Running two files that touch chain_jobs concurrently lets one
+        // file's relayer submit another file's pending job to its own, unrelated
+        // freshly-deployed anvil contracts. Sequential files close that race.
+        fileParallelism: false,
     },
 });

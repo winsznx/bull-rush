@@ -4,18 +4,20 @@
 // Canonical replay schema + encoding/hashing + structural validation.
 //
 // This is what a client submits as proof of a run, and what the server hashes and
-// re-simulates. Two rules matter more than anything else here:
-//   1. NEVER hash `JSON.stringify(obj)` on an arbitrary object — key order is not
-//      guaranteed stable across engines/versions, so two semantically-identical
-//      replays could hash differently. `canonicalStringify` below fixes key order
-//      explicitly (recursively, alphabetically) before anything is hashed.
-//   2. The hash function itself (`fnv1aHex`) is a fast, deterministic 32-bit
-//      fingerprint — NOT a cryptographic commitment. It is sufficient for
-//      off-chain consistency checks (server-side ruleset/replay matching) but is
-//      NOT what should back an on-chain receipt; Phase 6's contracts must hash
-//      the on-chain-bound fields with keccak256 (via viem) instead. Kept as a
-//      separate, clearly-named function specifically so that upgrade is a
-//      one-function swap, not an architecture change.
+// re-simulates. One rule matters more than anything else here: NEVER hash
+// `JSON.stringify(obj)` on an arbitrary object — key order is not guaranteed stable
+// across engines/versions, so two semantically-identical replays could hash
+// differently. `canonicalStringify` below fixes key order explicitly (recursively,
+// alphabetically) before anything is hashed.
+//
+// `hashCanonical` uses keccak256 (via viem) — a real 32-byte cryptographic hash, not
+// a fingerprint — because its output (RULESET_HASH, a Daily Grid's seed, a replay's
+// hash) is exactly what Phase 6/7's contracts and relayer treat as `bytes32` on-chain
+// values (DailyGridRegistry.openGrid, VerifiedRunRegistry.recordRun). An earlier
+// 32-bit FNV-1a version of this function was replaced once the relayer actually
+// needed to encode these values as real bytes32 ABI parameters.
+
+import { keccak256, toHex } from 'viem';
 
 export const REPLAY_SCHEMA_VERSION = 1;
 
@@ -47,21 +49,8 @@ export function canonicalStringify(value: unknown): string {
     return JSON.stringify(value);
 }
 
-// FNV-1a, 32-bit, hex-encoded as a 0x-prefixed 8-char string. Deterministic,
-// dependency-free, identical in browser and Node. Not cryptographically secure —
-// see the module header.
-export function fnv1aHex(input: string): `0x${string}` {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < input.length; i++) {
-        h ^= input.charCodeAt(i);
-        h = Math.imul(h, 0x01000193);
-    }
-    const hex = (h >>> 0).toString(16).padStart(8, '0');
-    return `0x${hex}`;
-}
-
 export function hashCanonical(value: unknown): `0x${string}` {
-    return fnv1aHex(canonicalStringify(value));
+    return keccak256(toHex(canonicalStringify(value)));
 }
 
 // The hash a verifier checks a submitted replay's `inputs`+`ticks` against, so a

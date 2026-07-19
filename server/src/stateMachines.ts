@@ -55,3 +55,36 @@ const CLAIM_TRANSITIONS: Record<ClaimStatus, ClaimStatus[]> = {
 export function canTransitionClaim(from: ClaimStatus, to: ClaimStatus): boolean {
     return CLAIM_TRANSITIONS[from].includes(to);
 }
+
+// Phase 7's relayer outbox (chain_jobs). `processing` can fall back to `pending` on a
+// retryable failure (network hiccup, nonce contention) — that's a legal transition, not
+// an error — or move to `failed` once retries are exhausted.
+export type ChainJobStatus = 'pending' | 'processing' | 'submitted' | 'confirmed' | 'failed';
+
+const CHAIN_JOB_TRANSITIONS: Record<ChainJobStatus, ChainJobStatus[]> = {
+    pending: ['processing'],
+    processing: ['submitted', 'pending', 'failed'],
+    submitted: ['confirmed', 'failed'], // failed: the tx was mined but reverted
+    confirmed: [],
+    failed: [],
+};
+
+export function canTransitionChainJob(from: ChainJobStatus, to: ChainJobStatus): boolean {
+    return CHAIN_JOB_TRANSITIONS[from].includes(to);
+}
+
+// daily_grids.indexing_state (Phase 3 added the column pre-emptively, defaulted to
+// 'off_chain'; Phase 7 is the first phase that actually moves it).
+export type GridIndexingState = 'off_chain' | 'queued' | 'submitted' | 'confirmed' | 'failed';
+
+const GRID_INDEXING_TRANSITIONS: Record<GridIndexingState, GridIndexingState[]> = {
+    off_chain: ['queued'],
+    queued: ['submitted', 'failed'],
+    submitted: ['confirmed', 'failed'],
+    confirmed: [],
+    failed: [],
+};
+
+export function canTransitionGridIndexing(from: GridIndexingState, to: GridIndexingState): boolean {
+    return GRID_INDEXING_TRANSITIONS[from].includes(to);
+}
