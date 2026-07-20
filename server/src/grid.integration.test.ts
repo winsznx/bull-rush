@@ -133,6 +133,10 @@ describe('Daily Grid lifecycle (real Postgres + Redis)', () => {
     });
 
     it('a personal best starts at receipt_queued and is pollable by its own identity only', async () => {
+        // Receipting is opt-in now (default 'off' for cost); this test is about
+        // the receipt lifecycle, so enable it for the duration.
+        const prevMode = process.env.CHAIN_RECEIPT_MODE;
+        process.env.CHAIN_RECEIPT_MODE = 'all';
         const dayId = `test-${randomUUID()}`;
         const grid = await openGrid(dayId);
         await sql`UPDATE daily_grids SET opens_at = now() - interval '1 minute' WHERE id = ${grid.id}`;
@@ -172,6 +176,9 @@ describe('Daily Grid lifecycle (real Postgres + Redis)', () => {
         // #then a different identity cannot read this run's status
         const stranger = await getVerifiedRunStatus(id, `player-${randomUUID()}`);
         expect(stranger).toBeNull();
+
+        if (prevMode === undefined) delete process.env.CHAIN_RECEIPT_MODE;
+        else process.env.CHAIN_RECEIPT_MODE = prevMode;
     });
 
     it('a non-personal-best run has no receipt to track and rests at verified', async () => {

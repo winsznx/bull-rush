@@ -12,9 +12,10 @@
 // repeated call returns the existing grid rather than rerolling it. That makes
 // "just re-check on an interval" a correct strategy rather than a risky one,
 // and means multiple server replicas racing each other is harmless.
-import { openGrid } from './grid.ts';
+import { closedUnsettledGrids, markGridSettled, openGrid, settleGridReceipts } from './grid.ts';
 import { dayIdFor } from './sim/grid.ts';
 import { log } from './logger.ts';
+import { loadReceiptPolicy, shouldSettleAtClose } from './receiptPolicy.ts';
 
 // Hourly is deliberate. A daily timer that fires at 00:00 has exactly one
 // chance to work; if the process happens to be restarting or the network
@@ -37,8 +38,31 @@ export async function ensureTodaysGrid(): Promise<void> {
     }
 }
 
+// Receipts the final top-N of any grid that has closed, under the 'top_n'
+// policy. Marked settled afterwards so the sweep does not re-examine it — and
+// even if it did, enqueueing is idempotent, so the cost cannot double.
+export async function settleClosedGrids(): Promise<void> {
+    const policy = loadReceiptPolicy();
+    if (!shouldSettleAtClose(policy)) return;
+
+    try {
+        for (const grid of await closedUnsettledGrids()) {
+            const enqueued = await settleGridReceipts(grid.id, policy.topN);
+            await markGridSettled(grid.id);
+            log.info({ dayId: grid.day_id, gridId: grid.id, enqueued, topN: policy.topN }, 'grid receipts settled');
+        }
+    } catch (err) {
+        log.error({ err: err instanceof Error ? err : new Error(String(err)) }, 'failed to settle closed grids');
+    }
+}
+
+async function tick(): Promise<void> {
+    await ensureTodaysGrid();
+    await settleClosedGrids();
+}
+
 export function startGridScheduler(): () => void {
-    void ensureTodaysGrid();
-    const timer = setInterval(() => void ensureTodaysGrid(), CHECK_INTERVAL_MS);
+    void tick();
+    const timer = setInterval(() => void tick(), CHECK_INTERVAL_MS);
     return () => clearInterval(timer);
 }

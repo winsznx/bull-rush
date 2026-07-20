@@ -60,6 +60,10 @@ describe('relayer + indexer (real anvil chain, real Phase 6 contracts)', () => {
     let verifiedRunRegistryAddress: Address;
 
     beforeAll(async () => {
+        // This suite exercises the on-chain receipting path end to end, so it
+        // opts into 'all' mode explicitly. Production defaults to 'off' (cost
+        // containment — see server/src/receiptPolicy.ts).
+        process.env.CHAIN_RECEIPT_MODE = 'all';
         await runMigrations();
         // Start with an empty queue: chain_jobs persists across separate local runs of
         // this suite (unlike other tables here, nothing in it needs to survive between

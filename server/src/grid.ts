@@ -16,6 +16,7 @@ import { GAME_VERSION, RULESET_HASH } from './sim/ruleset.ts';
 import { canTransitionTicket, canTransitionVerifiedRun, type VerifiedRunStatus } from './stateMachines.ts';
 import { enqueueChainJob } from './chain/outbox.ts';
 import { toOnChainGridId, toOnChainRunId } from './chain/onchainIds.ts';
+import { loadReceiptPolicy, shouldReceiptImmediately } from './receiptPolicy.ts';
 
 const TICKET_TTL_SEC = 3600;
 
@@ -280,7 +281,11 @@ export async function recordVerifiedRun(p: RecordVerifiedRunParams): Promise<Rec
 
     let status: VerifiedRunStatus = p.suspicious ? 'risk_hold' : 'verified';
 
-    if (isPersonalBest) {
+    // Per-run receipts are budget-driven (server/src/receiptPolicy.ts). In the
+    // default 'off'/'top_n' modes nothing is enqueued here — the day's course is
+    // still committed on-chain by openGrid, and top_n settles at grid close — so
+    // the daily gas bill stays flat no matter how many people play.
+    if (shouldReceiptImmediately(loadReceiptPolicy(), isPersonalBest)) {
         const [grid] = await sql<{ day_id: string }[]>`SELECT day_id FROM daily_grids WHERE id = ${p.gridId}`;
         const onChainGridId = toOnChainGridId(grid.day_id);
         const runId = toOnChainRunId(onChainGridId, p.player, p.replayHash);
@@ -537,4 +542,70 @@ export async function clearUserRiskState(identityKey: string): Promise<boolean> 
         RETURNING id
     `;
     return rows.length > 0;
+}
+
+// Settles a closed grid by receipting its final top-N on-chain (the 'top_n'
+// receipt policy). Runs against the *final* leaderboard, so exactly N receipts
+// are ever enqueued for a day regardless of how many people played or how many
+// personal bests were set along the way — that flatness is the entire point.
+//
+// Idempotent twice over: each job's idempotency_key is derived from the run's
+// own on-chain runId, and the whole function is safe to re-run because
+// enqueueChainJob does nothing on conflict. So an hourly sweep can call this
+// for the same grid repeatedly without duplicating spend.
+export async function settleGridReceipts(gridId: string, topN: number): Promise<number> {
+    const [grid] = await sql<{ day_id: string }[]>`SELECT day_id FROM daily_grids WHERE id = ${gridId}`;
+    if (!grid) return 0;
+    const onChainGridId = toOnChainGridId(grid.day_id);
+
+    const board = await getGridLeaderboard(gridId, topN);
+    let enqueuedCount = 0;
+
+    for (const entry of board) {
+        // The identity key is `${chainId}:${walletAddress}` — the wallet is what
+        // the contract records as `player`.
+        const player = entry.identityKey.split(':')[1];
+        if (!player) continue;
+
+        const [run] = await sql<{ id: string; replay_hash: string; distance: number; score: number; game_version: string }[]>`
+            SELECT id, replay_hash, distance, score, game_version FROM verified_runs
+            WHERE grid_id = ${gridId} AND identity_key = ${entry.identityKey} AND status = 'verified'
+            ORDER BY distance DESC LIMIT 1
+        `;
+        if (!run) continue;
+
+        const replayHash = run.replay_hash as `0x${string}`;
+        const runId = toOnChainRunId(onChainGridId, player as `0x${string}`, replayHash);
+
+        const { enqueued } = await enqueueChainJob('record_run', `record_run:${runId}`, {
+            verifiedRunId: run.id,
+            runId,
+            onChainGridId,
+            player,
+            replayHash,
+            distance: run.distance,
+            score: run.score,
+            gameVersion: run.game_version,
+        });
+        if (enqueued) {
+            await sql`UPDATE verified_runs SET status = 'receipt_queued' WHERE id = ${run.id} AND status = 'verified'`;
+            enqueuedCount += 1;
+        }
+    }
+
+    return enqueuedCount;
+}
+
+// Grids that have closed but whose final standings were never settled.
+export async function closedUnsettledGrids(): Promise<{ id: string; day_id: string }[]> {
+    return sql<{ id: string; day_id: string }[]>`
+        SELECT id, day_id FROM daily_grids
+        WHERE closes_at <= now() AND settled_at IS NULL
+        ORDER BY closes_at
+        LIMIT 10
+    `;
+}
+
+export async function markGridSettled(gridId: string): Promise<void> {
+    await sql`UPDATE daily_grids SET settled_at = now() WHERE id = ${gridId} AND settled_at IS NULL`;
 }
