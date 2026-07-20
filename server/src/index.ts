@@ -57,6 +57,8 @@ import { createSeason, closeSeason, getLatestSeason, getRewardsForUser } from '.
 import { resolveAdminRole, roleAllows, actionFingerprint, type AdminRole } from './adminAuth.ts';
 import { issueConfirmToken, consumeConfirmToken } from './adminConfirm.ts';
 import { audit, recentAudits } from './audit.ts';
+import { log } from './logger.ts';
+import { recordRequest, recordError, metricsSnapshot, statusReport } from './metrics.ts';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import {
     issueNonce,
@@ -118,6 +120,27 @@ const adminDenied = (c: Context, gate: { status: 403 | 429 }) =>
 
 const app = new Hono();
 
+// Structured request logging + metrics on every API route (static/health
+// noise excluded). Metrics are fire-and-forget; logging is one JSON line.
+app.use('/api/*', async (c, next) => {
+    const start = Date.now();
+    await next();
+    const durationMs = Date.now() - start;
+    recordRequest(c.req.method, c.req.path, c.res.status, durationMs);
+    log.info(
+        { method: c.req.method, path: c.req.path, status: c.res.status, durationMs, ipHint: ipHintOf(ipOf(c)) },
+        'request',
+    );
+});
+
+// Any unhandled route error becomes one structured error event + a counted
+// metric + an opaque 500 — stack traces stay in the logs, never in responses.
+app.onError((err, c) => {
+    recordError('http');
+    log.error({ err, method: c.req.method, path: c.req.path }, 'unhandled route error');
+    return c.json({ error: 'internal_error' }, 500);
+});
+
 const allow = (process.env.ALLOWED_ORIGIN || '*').split(',').map((s) => s.trim());
 app.use(
     '*',
@@ -163,6 +186,22 @@ const ipOf = (c: { req: { header: (k: string) => string | undefined } }) =>
 const BOOT_TIME = Date.now();
 app.get('/', (c) => c.text('BULL RUSH API — charge.'));
 app.get('/health', (c) => c.json({ ok: true, startedAt: BOOT_TIME }));
+
+// Public status surface: real round-trips to Postgres + Redis, game version,
+// relayer configuration state. Non-sensitive by construction — no counts, no
+// keys, no internal addresses.
+app.get('/status', async (c) => {
+    const report = await statusReport();
+    return c.json(
+        {
+            ...report,
+            gameVersion: GAME_VERSION,
+            rulesetHash: RULESET_HASH,
+            relayer: loadChainConfig() ? 'enabled' : 'disabled',
+        },
+        report.ok ? 200 : 503,
+    );
+});
 
 app.post('/api/run/start', async (c) => {
     const ip = ipOf(c);
@@ -844,6 +883,13 @@ app.get('/api/admin/audits', async (c) => {
     return c.json({ ok: true, audits });
 });
 
+// Request/error/duration counters + process stats (server/src/metrics.ts).
+app.get('/api/admin/metrics', async (c) => {
+    const gate = await requireAdmin(c, 'read');
+    if (!gate.ok) return adminDenied(c, gate);
+    return c.json({ ok: true, ...(await metricsSnapshot()) });
+});
+
 // Read-only visibility into the relayer's outbox — is anything stuck pending/failed?
 // (Phase 12/13 will add real alerting; this is the interim operator view.)
 app.get('/api/admin/chain-jobs', async (c) => {
@@ -944,7 +990,20 @@ await assertMigrationsApplied();
 const chainConfig = loadChainConfig();
 if (chainConfig) {
     startRelayerLoop(chainConfig, 15_000);
-    console.log('chain relayer loop started (chainId', chainConfig.chainId, ')');
+    log.info({ chainId: chainConfig.chainId }, 'chain relayer loop started');
 }
 
-serve({ fetch: app.fetch, port }, (info) => console.log(`BULL RUSH API listening on :${info.port}`));
+// Last-resort process handlers: one structured line each, counted. An
+// uncaught exception still exits (state is unknowable past this point) —
+// the platform restarts the process; swallowing it would be worse.
+process.on('unhandledRejection', (reason) => {
+    recordError('unhandled_rejection');
+    log.error({ err: reason instanceof Error ? reason : new Error(String(reason)) }, 'unhandled promise rejection');
+});
+process.on('uncaughtException', (err) => {
+    recordError('uncaught_exception');
+    log.error({ err }, 'uncaught exception — exiting');
+    process.exit(1);
+});
+
+serve({ fetch: app.fetch, port }, (info) => log.info({ port: info.port }, 'BULL RUSH API listening'));

@@ -9,6 +9,7 @@
 // compliance posture this project can adopt in ops config later if required.)
 import { randomUUID } from 'node:crypto';
 import { sql } from './db.ts';
+import { log } from './logger.ts';
 
 export async function audit(
     actor: string,
@@ -22,7 +23,7 @@ export async function audit(
             VALUES (${randomUUID()}, ${actor}, ${action}, ${target}, ${sql.json(metadata)})
         `;
     } catch (err) {
-        console.error('audit write failed', action, err instanceof Error ? err.message : err);
+        log.error({ err: err instanceof Error ? err : new Error(String(err)), auditAction: action }, 'audit write failed');
     }
 }
 

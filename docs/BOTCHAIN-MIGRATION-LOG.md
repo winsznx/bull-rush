@@ -759,4 +759,46 @@ trail. `closeSeason` gained a `{ dryRun }` option (computes everything, writes n
 they slot in later without a migration), a session-based admin UI, refuse-on-audit-failure
 mode (availability-over-completeness default, documented).
 
+## Phase 13 — Structured logging, metrics, status surface
+
+Replaces scattered `console.*` with an observability layer scoped to what is real now — no
+external APM/error-tracking account exists, so nothing was built against one.
+
+**`server/src/logger.ts`** — hand-rolled JSON-lines logger with a pino-shaped interface
+(`log.info(fields, msg)`, `child()`) so a later pino swap is mechanical. Redaction is the
+logger's job, not call-site discipline: credential-like field NAMES (`token`, `signature`,
+`password`, `cookie`, `authorization`, `private`, `*key`…) mask recursively wherever they
+appear; Errors serialize to name/message/stack; depth-capped. Errors to stderr, `LOG_LEVEL`
+honored.
+
+**`server/src/metrics.ts`** — Redis-backed request counters + fixed-bucket duration histograms,
+keyed by NORMALIZED route (`/api/grid/<uuid>/ghost` → `/api/grid/:id/ghost`, so key cardinality
+cannot grow with data), fire-and-forget (metrics never add latency or a failure mode to the
+request path); error counters; `statusReport()` doing genuine `SELECT 1`/`PING` round-trips
+with measured latencies.
+
+**`server/src/index.ts`** — `/api/*` middleware (one JSON request line + metrics per call);
+`app.onError` → structured event + counted metric + opaque 500 (stacks never in responses);
+`unhandledRejection` logs and counts, `uncaughtException` logs, counts, and exits (state is
+unknowable past that point — the platform restart is the recovery); public `GET /status`
+(healthy/503 with dependency latencies, game version, relayer config state — non-sensitive by
+construction); `GET /api/admin/metrics` (read role). `audit.ts`/`relayer.ts` console calls
+replaced; `migrate.ts` keeps `console.log` deliberately (CLI output for a human, not telemetry).
+
+**Testing — genuinely run:**
+- `logger.test.ts` (3, pure): nested credential masking, Error serialization, depth safety.
+- `metrics.integration.test.ts` (3, real Redis+Postgres): route normalization, a recorded
+  request lands in the right count key and duration bucket and reads back, healthy status
+  report with real latencies.
+- **Live over real HTTP**: the E2E script asserts `/status` healthy up front and, after the
+  full loop, asserts its own submissions appear in `/api/admin/metrics` (2 × 2xx — the honest
+  run and the shadow-held perturbed copy, itself correctly a 200). Structured request logs
+  inspected in the live server output.
+- Full regression: typechecks + `sim:check` clean; 97/97 unit (+3); 35/35 sim (fingerprint
+  unchanged); 38/38 integration (+3); full build.
+
+**Not done in Phase 13** (see ADR 0013): Prometheus/TSDB export (the admin snapshot answers
+today's question; revisit with real traffic), Sentry/APM integration (no account to test
+against), a styled status page (the JSON surface is the substance; rendering can come free).
+
 <!-- Append future phase entries below this line, in commit order. -->

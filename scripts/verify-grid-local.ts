@@ -64,6 +64,14 @@ async function main() {
     const health = await (await fetch(`${API}/health`)).json();
     console.log('\nhealth:', JSON.stringify(health));
 
+    // Public status surface: real Postgres/Redis round-trips, not a hardcoded ok.
+    const statusHttp = await fetch(`${API}/status`);
+    const statusBody = (await statusHttp.json()) as { ok: boolean; postgres: { ok: boolean }; redis: { ok: boolean }; relayer: string };
+    console.log('status:', JSON.stringify(statusBody));
+    if (statusHttp.status !== 200 || !statusBody.ok || !statusBody.postgres.ok || !statusBody.redis.ok) {
+        throw new Error('status surface reports unhealthy');
+    }
+
     // 1. Sign in with a throwaway wallet (never a fund-holding key).
     const account = privateKeyToAccount(generatePrivateKey());
     console.log(`\nthrowaway wallet: ${account.address}`);
@@ -260,7 +268,16 @@ async function main() {
     // Sole verified player in the season -> the full (floored) pool.
     const rewardOk = !!myReward && myReward.amountWei === capWei && myReward.status === 'eligible' && myReward.merkleRoot === closeRes.root;
 
-    const ok = statusOk && ghostOk && copyRejected && perturbedHeld && rewardOk;
+    // 8. Metrics surface: the requests this script just made must be counted.
+    const metricsRes = (await (await api('/api/admin/metrics', { headers: { 'x-admin-key': KEY } })).json()) as {
+        ok?: boolean;
+        requests?: Record<string, number>;
+    };
+    const submitCount = metricsRes.requests?.['POST:/api/grid/submit:2xx'] ?? 0;
+    const metricsOk = metricsRes.ok === true && submitCount >= 1;
+    console.log('metrics: grid submits counted =', submitCount, metricsOk ? '(✓)' : '(✗)');
+
+    const ok = statusOk && ghostOk && copyRejected && perturbedHeld && rewardOk && metricsOk;
     console.log(
         ok
             ? '\n✅ WALLET + GRID + RECEIPT-STATUS + VERIFIED-GHOST + ANTI-COPY (EXACT & PERTURBED) + SEASON-REWARDS LOOP WORKS\n'

@@ -8,6 +8,7 @@ import { DAILY_GRID_REGISTRY_ABI, VERIFIED_RUN_REGISTRY_ABI } from './abis.ts';
 import { type ChainRelayerConfig, createChainClients } from './client.ts';
 import { claimNextJob, markAttemptFailed, markConfirmed, markReverted, markSubmitted, type ChainJobRow } from './outbox.ts';
 import { canTransitionGridIndexing, canTransitionVerifiedRun } from '../stateMachines.ts';
+import { log } from '../logger.ts';
 
 interface OpenGridPayload {
     dayId: string;
@@ -128,7 +129,7 @@ export async function drainJobs(config: ChainRelayerConfig, maxJobs: number): Pr
 
 export function startRelayerLoop(config: ChainRelayerConfig, intervalMs: number): () => void {
     const timer = setInterval(() => {
-        drainJobs(config, 10).catch((err) => console.error('relayer loop error', err));
+        drainJobs(config, 10).catch((err) => log.error({ err: err instanceof Error ? err : new Error(String(err)) }, 'relayer loop error'));
     }, intervalMs);
     return () => clearInterval(timer);
 }
