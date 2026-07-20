@@ -227,6 +227,8 @@ export interface RecordVerifiedRunParams {
     deathCause: string;
     durationMs: number;
     suspicious: boolean;
+    riskReasons: string[];
+    ipHint: string | null;
     replayLen: number;
 }
 
@@ -261,12 +263,14 @@ export async function recordVerifiedRun(p: RecordVerifiedRunParams): Promise<Rec
     await sql`
         INSERT INTO verified_runs (
             id, grid_id, ticket_id, identity_key, game_version, replay_hash, replay,
-            distance, score, max_combo, death_cause, duration_ms, is_personal_best, replay_len, status
+            distance, score, max_combo, death_cause, duration_ms, is_personal_best, replay_len, status,
+            risk_reasons, ip_hint
         ) VALUES (
             ${id}, ${p.gridId}, ${p.ticketId}, ${p.identityKey}, ${p.gameVersion}, ${p.replayHash},
             ${sql.json({ v: REPLAY_SCHEMA_VERSION, ticks: p.replayTicks, inputs: p.replayInputsFlat })},
             ${p.distance}, ${p.score}, ${p.maxCombo}, ${p.deathCause}, ${p.durationMs},
-            ${isPersonalBest}, ${p.replayLen}, ${p.suspicious ? 'risk_hold' : 'verified'}
+            ${isPersonalBest}, ${p.replayLen}, ${p.suspicious ? 'risk_hold' : 'verified'},
+            ${p.riskReasons}, ${p.ipHint}
         )
     `;
 
@@ -385,5 +389,97 @@ export async function getGridGhost(gridId: string, identityKey?: string): Promis
         seed: row.seed as `0x${string}`,
         ticks: row.replay.ticks,
         inputs: row.replay.inputs,
+    };
+}
+
+// Candidate replays for near-duplicate comparison: only runs whose input count
+// AND outcome land near the submission's (a perturbed copy necessarily does;
+// honest unrelated runs rarely do) — keeps the O(n*m) LCS bounded to a handful
+// of genuinely plausible sources. Includes risk_hold rows: a copy of a copy is
+// still a copy.
+export async function getSimilarityCandidates(
+    gridId: string,
+    distance: number,
+    inputCount: number,
+    lenWindow: number,
+    distanceWindow: number,
+): Promise<{ identityKey: string; replay: { ticks: number; inputs: number[] } }[]> {
+    const minLen = Math.floor(inputCount * (1 - lenWindow));
+    const maxLen = Math.ceil(inputCount * (1 + lenWindow));
+    const minDist = Math.floor(distance * (1 - distanceWindow));
+    const maxDist = Math.ceil(distance * (1 + distanceWindow));
+    const rows = await sql<{ identity_key: string; replay: { ticks: number; inputs: number[] } }[]>`
+        SELECT identity_key, replay FROM verified_runs
+        WHERE grid_id = ${gridId} AND replay IS NOT NULL
+          AND replay_len BETWEEN ${minLen} AND ${maxLen}
+          AND distance BETWEEN ${minDist} AND ${maxDist}
+        ORDER BY created_at DESC
+        LIMIT 25
+    `;
+    return rows.map((r) => ({ identityKey: r.identity_key, replay: r.replay }));
+}
+
+const REPEAT_OFFENDER_WINDOW_DAYS = 7;
+const REPEAT_OFFENDER_THRESHOLD = 3;
+
+// A user whose runs keep landing in risk_hold gets marked for review — a
+// marker, not a punishment: nothing automated changes for a 'flagged' user
+// (Phase 12's review process decides). Idempotent, monotonic (never un-flags).
+export async function escalateRepeatOffender(identityKey: string): Promise<boolean> {
+    const [{ count }] = await sql<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM verified_runs
+        WHERE identity_key = ${identityKey} AND status = 'risk_hold'
+          AND created_at > now() - make_interval(days => ${REPEAT_OFFENDER_WINDOW_DAYS})
+    `;
+    if (count < REPEAT_OFFENDER_THRESHOLD) return false;
+    const [chainIdStr, wallet] = identityKey.split(':');
+    await sql`
+        UPDATE users SET risk_state = 'flagged'
+        WHERE chain_id = ${Number(chainIdStr)} AND wallet_address = ${wallet} AND risk_state = 'none'
+    `;
+    return true;
+}
+
+export interface RiskOverview {
+    heldRuns: { id: string; gridId: string; identityKey: string; distance: number; riskReasons: string[]; createdAt: number }[];
+    flaggedUsers: { identityKey: string; heldCount: number }[];
+    sharedIpClusters: { gridId: string; ipHint: string; identities: string[] }[];
+}
+
+// Read-only review surface for Phase 12: what is held and why, who keeps
+// getting held, and which wallets share a network origin on the same grid.
+export async function getRiskOverview(limit: number): Promise<RiskOverview> {
+    const held = await sql<{ id: string; grid_id: string; identity_key: string; distance: number; risk_reasons: string[]; created_at: Date }[]>`
+        SELECT id, grid_id, identity_key, distance, risk_reasons, created_at
+        FROM verified_runs WHERE status = 'risk_hold'
+        ORDER BY created_at DESC LIMIT ${limit}
+    `;
+    const flagged = await sql<{ identity_key: string; held_count: number }[]>`
+        SELECT vr.identity_key, count(*)::int AS held_count
+        FROM verified_runs vr
+        JOIN users u ON u.chain_id::text = split_part(vr.identity_key, ':', 1) AND u.wallet_address = split_part(vr.identity_key, ':', 2)
+        WHERE u.risk_state = 'flagged' AND vr.status = 'risk_hold'
+        GROUP BY vr.identity_key
+    `;
+    const clusters = await sql<{ grid_id: string; ip_hint: string; identities: string[] }[]>`
+        SELECT grid_id, ip_hint, array_agg(DISTINCT identity_key) AS identities
+        FROM verified_runs
+        WHERE ip_hint IS NOT NULL
+        GROUP BY grid_id, ip_hint
+        HAVING count(DISTINCT identity_key) >= 2
+        ORDER BY count(DISTINCT identity_key) DESC
+        LIMIT ${limit}
+    `;
+    return {
+        heldRuns: held.map((r) => ({
+            id: r.id,
+            gridId: r.grid_id,
+            identityKey: r.identity_key,
+            distance: r.distance,
+            riskReasons: r.risk_reasons,
+            createdAt: r.created_at.getTime(),
+        })),
+        flaggedUsers: flagged.map((r) => ({ identityKey: r.identity_key, heldCount: r.held_count })),
+        sharedIpClusters: clusters.map((r) => ({ gridId: r.grid_id, ipHint: r.ip_hint, identities: r.identities })),
     };
 }

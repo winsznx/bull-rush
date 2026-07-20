@@ -2,7 +2,7 @@ import { serve } from '@hono/node-server';
 import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import { z } from 'zod';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -23,7 +23,7 @@ import {
 import { rankFor } from './ranks.ts';
 import { simulate, type Act, type InputEvent } from './sim/sim.ts';
 import { verifyReplayEnvelope } from './sim/verify.ts';
-import { REPLAY_SCHEMA_VERSION, replayHash, encodeInputsFlat, type RunReplay } from './sim/replay.ts';
+import { REPLAY_SCHEMA_VERSION, replayHash, encodeInputsFlat, decodeInputsFlat, type RunReplay } from './sim/replay.ts';
 import { GAME_VERSION, RULESET_HASH } from './sim/ruleset.ts';
 import {
     openGrid,
@@ -37,7 +37,17 @@ import {
     sweepExpiredTickets,
     gridHasReplayHash,
     getGridGhost,
+    getSimilarityCandidates,
+    escalateRepeatOffender,
+    getRiskOverview,
 } from './grid.ts';
+import {
+    assessRun,
+    cadenceSignal,
+    MAX_RUN_MS as BEHAVIOR_MAX_RUN_MS,
+    SIMILARITY_LEN_WINDOW,
+    SIMILARITY_DISTANCE_WINDOW,
+} from './behavior.ts';
 import { listChainJobs } from './chain/outbox.ts';
 import { drainJobs, startRelayerLoop } from './chain/relayer.ts';
 import { loadChainConfig } from './chain/client.ts';
@@ -58,7 +68,7 @@ import {
 // engine's own technical ceiling in sim.ts/replay.ts), and its derived duration
 // can't exceed how long the token actually existed (+ slack for the game-over
 // screen, name entry, and network). Together these kill crafted, absurdly-long runs.
-const MAX_RUN_MS = 1_800_000;
+const MAX_RUN_MS = BEHAVIOR_MAX_RUN_MS;
 const RUN_TIME_SLACK_MS = 30_000;
 
 // Share-card assets (bundled, loaded once at boot).
@@ -69,18 +79,18 @@ const cardBase = await loadImage(readFileSync(join(ASSET_DIR, 'card-base.jpg')))
 const esc = (s: string) =>
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-// Log-only bot signals on the (already replay-verified) trace: robotic regularity
-// or superhuman input rate. Reaction-time-vs-obstacle analysis is a later add.
-function botLike(inputs: InputEvent[], endTick: number): boolean {
-    if (inputs.length < 30) return false;
-    const gaps: number[] = [];
-    for (let i = 1; i < inputs.length; i++) gaps.push(inputs[i].tick - inputs[i - 1].tick);
-    const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-    if (mean <= 0) return true;
-    const variance = gaps.reduce((a, g) => a + (g - mean) * (g - mean), 0) / gaps.length;
-    const cv = Math.sqrt(variance) / mean;
-    const perSec = inputs.length / (endTick / 60 || 1);
-    return cv < 0.06 || perSec > 12;
+// Bot signals live in server/src/behavior.ts since Phase 11 (shared by the
+// practice and grid paths, pure and unit-tested). Kept as a local alias so
+// the practice submit path below reads unchanged.
+const botLike = cadenceSignal;
+
+// Sybil review signal: a salted hash prefix of the submitting IP, never the raw
+// IP. Correlation-only (which wallets share a network origin on a grid); NULL
+// (feature off) unless IP_HINT_SALT is configured, so no accidental collection.
+function ipHintOf(ip: string): string | null {
+    const salt = process.env.IP_HINT_SALT;
+    if (!salt || ip === 'anon') return null;
+    return createHash('sha256').update(`${salt}:${ip}`).digest('hex').slice(0, 16);
 }
 
 const app = new Hono();
@@ -444,12 +454,9 @@ app.post('/api/grid/submit', async (c) => {
 
     const inputs: InputEvent[] = replay.inputs.map((i) => ({ tick: i.tick, act: i.action as Act }));
     const r = simulate(ticket.seed, inputs, replay.ticks);
-    const botFlag = botLike(inputs, r.endTick);
     await redis.incr('verify:grid:accepted');
-    if (botFlag) await redis.incr('verify:grid:bot');
 
     const durationMs = Math.round((r.endTick / 60) * 1000);
-    const suspicious = durationMs < 1500 || durationMs > MAX_RUN_MS || botFlag;
     const deathCause = r.alive ? 'RUN ENDED (TIME LIMIT).' : r.deathCause;
 
     // Ghost replays are public by design (racing one means downloading its input
@@ -461,6 +468,20 @@ app.post('/api/grid/submit', async (c) => {
         await redis.incr('verify:grid:rejected:duplicate_replay');
         return c.json({ error: 'duplicate_replay' }, 409);
     }
+
+    // Behavioral signals (server/src/behavior.ts): machine cadence, implausible
+    // duration, and the perturbed-copy attack — a stolen public ghost log with
+    // nudged ticks evades the exact-hash gate but not tolerance-based LCS
+    // similarity against this grid's stored replays.
+    const candidates = (await getSimilarityCandidates(
+        ticket.grid_id,
+        r.distance,
+        replay.inputs.length,
+        SIMILARITY_LEN_WINDOW,
+        SIMILARITY_DISTANCE_WINDOW,
+    )).map((cand) => ({ identityKey: cand.identityKey, inputs: decodeInputsFlat(cand.replay.inputs) }));
+    const assessment = assessRun({ inputs: replay.inputs, endTick: r.endTick, durationMs, candidates });
+    for (const reason of assessment.reasons) await redis.incr(`verify:grid:risk:${reason}`);
 
     let recorded;
     try {
@@ -478,7 +499,9 @@ app.post('/api/grid/submit', async (c) => {
             maxCombo: r.maxCombo,
             deathCause,
             durationMs,
-            suspicious,
+            suspicious: assessment.suspicious,
+            riskReasons: assessment.reasons,
+            ipHint: ipHintOf(ip),
             replayLen: replay.inputs.length,
         });
     } catch (err) {
@@ -495,7 +518,11 @@ app.post('/api/grid/submit', async (c) => {
     // A suspicious run is shadow-hidden entirely — no runId, no status to poll —
     // so a cheater sees nothing distinguishing it from a normal accepted run
     // silently not making the board, rather than an explicit "flagged" signal.
-    if (suspicious) return c.json({ ok: true, hidden: true, gridId: ticket.grid_id });
+    // Repeated holds escalate the user to review (a marker, never auto-punishment).
+    if (assessment.suspicious) {
+        await escalateRepeatOffender(identityKey);
+        return c.json({ ok: true, hidden: true, gridId: ticket.grid_id });
+    }
 
     return c.json({
         ok: true,
@@ -696,6 +723,17 @@ app.post('/api/admin/flag-implausible', async (c) => {
         WHERE suspicious = false AND (distance > ${maxDistance} OR duration_ms > ${maxDurationMs})
         RETURNING name, distance, duration_ms`;
     return c.json({ ok: true, flagged: flagged.length, maxDistance, maxDurationMs, rows: flagged });
+});
+
+// Read-only review surface for behavioral risk: held runs with their explicit
+// reasons, repeat-flagged users, and shared-network-origin wallet clusters
+// (review signals, never automatic punishment — see server/src/behavior.ts).
+app.get('/api/admin/risk', async (c) => {
+    const key = process.env.ADMIN_KEY;
+    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const limit = Math.max(1, Math.min(200, Number(c.req.query('limit')) || 50));
+    const overview = await getRiskOverview(limit);
+    return c.json({ ok: true, ...overview });
 });
 
 // Read-only visibility into the relayer's outbox — is anything stuck pending/failed?

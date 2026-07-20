@@ -185,11 +185,37 @@ async function main() {
     const copyRejected = copyRes.status === 409 && copyBody.error === 'duplicate_replay';
     console.log('copy attack:', copyRes.status, JSON.stringify(copyBody));
 
+    // 6b. The PERTURBED copy attack (Phase 11): nudge a few ticks so the hash
+    // changes (evading the exact-hash gate), keep the run effectively identical.
+    // Expect a shadow-hold: ok:true + hidden (no runId) — the near-duplicate
+    // LCS similarity gate catches what the hash gate can't, and the copier is
+    // told nothing about being flagged.
+    const ticket3 = (await (await api('/api/grid/ticket', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gridId: openRes.grid.id }),
+    })).json()) as { ticket?: { id: string } };
+    if (!ticket3.ticket) throw new Error('third ticket request failed');
+    const perturbed: RunReplay = {
+        ...replay,
+        runId: ticket3.ticket.id,
+        inputs: replay.inputs.map((ev, i) => (i % 7 === 3 ? { tick: ev.tick + 1, action: ev.action } : ev)),
+    };
+    const perturbedRes = (await (await api('/api/grid/submit', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ticketId: ticket3.ticket.id, replay: perturbed }),
+    })).json()) as { ok?: boolean; hidden?: boolean; runId?: string };
+    const perturbedHeld = perturbedRes.ok === true && perturbedRes.hidden === true && !perturbedRes.runId;
+    console.log('perturbed-copy attack:', JSON.stringify(perturbedRes), perturbedHeld ? '(shadow-held ✓)' : '(NOT HELD ✗)');
+
     // 7. Season Zero lifecycle, live: create a season, pull this grid into its
     // (already-ended) window, close it, and fetch our own entitlement + proof.
     const seasonId = `verify-season-${randomBytes(4).toString('hex')}`;
     const capWei = '1000000000000000000'; // 1 BOT pool
-    const base = Date.now() - 900 * 24 * 3_600_000;
+    // Random far-past hour: a fixed offset would sweep up grids left behind by
+    // previous runs of this same script against the same local database.
+    const base = Date.now() - (10_000 + Math.floor(Math.random() * 200_000)) * 3_600_000;
     const createSeasonRes = await api(`/api/admin/season/create`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-admin-key': KEY },
@@ -199,7 +225,7 @@ async function main() {
             asset: '0x0000000000000000000000000000000000000000',
             capWei,
             startsAt: base,
-            endsAt: base + 24 * 3_600_000,
+            endsAt: base + 2 * 3_600_000,
         }),
     });
     if (!createSeasonRes.ok) throw new Error('season create failed');
@@ -223,10 +249,10 @@ async function main() {
     // Sole verified player in the season -> the full (floored) pool.
     const rewardOk = !!myReward && myReward.amountWei === capWei && myReward.status === 'eligible' && myReward.merkleRoot === closeRes.root;
 
-    const ok = statusOk && ghostOk && copyRejected && rewardOk;
+    const ok = statusOk && ghostOk && copyRejected && perturbedHeld && rewardOk;
     console.log(
         ok
-            ? '\n✅ WALLET + GRID + RECEIPT-STATUS + VERIFIED-GHOST + ANTI-COPY + SEASON-REWARDS LOOP WORKS\n'
+            ? '\n✅ WALLET + GRID + RECEIPT-STATUS + VERIFIED-GHOST + ANTI-COPY (EXACT & PERTURBED) + SEASON-REWARDS LOOP WORKS\n'
             : '\n⚠️ unexpected result — check server logs\n',
     );
 }

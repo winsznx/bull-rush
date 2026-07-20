@@ -72,14 +72,15 @@ async function seedPlayer(): Promise<Player> {
     return { userId, wallet, identityKey: `677:${wallet}` };
 }
 
-// Each season test gets its own disjoint window far in the past, with its grid
-// backdated INTO that window — so no other test's grids (all created "now") can
-// ever fall inside it, and the window is always already over (closeable).
-let windowCounter = 0;
+// Each season test gets its own disjoint 2-hour window at a RANDOM far-past
+// hour, with its grid backdated INTO that window — so neither this run's other
+// grids (created "now") nor any grid left behind by a PREVIOUS local suite run
+// can fall inside it. Randomness matters: a deterministic offset collided with
+// leftover data from earlier runs of this same suite against the same local DB.
 function uniquePastWindow(): { startsAt: Date; endsAt: Date; gridCreatedAt: Date } {
-    windowCounter += 1;
-    const base = Date.now() - (1000 + windowCounter * 10) * 24 * 3_600_000;
-    return { startsAt: new Date(base), endsAt: new Date(base + 24 * 3_600_000), gridCreatedAt: new Date(base + 3_600_000) };
+    const hoursBack = 10_000 + Math.floor(Math.random() * 200_000);
+    const base = Date.now() - hoursBack * 3_600_000;
+    return { startsAt: new Date(base), endsAt: new Date(base + 2 * 3_600_000), gridCreatedAt: new Date(base + 30 * 60_000) };
 }
 
 async function seedRun(player: Player, gridId: string, distance: number): Promise<void> {
@@ -100,6 +101,8 @@ async function seedRun(player: Player, gridId: string, distance: number): Promis
         deathCause: 'test',
         durationMs: 5000,
         suspicious: false,
+        riskReasons: [],
+        ipHint: null,
         replayLen: 2,
     });
 }
@@ -283,6 +286,8 @@ describe('Season Zero lifecycle (real Postgres + real SeasonPrizeVault on anvil)
             deathCause: 'test',
             durationMs: 100,
             suspicious: true,
+            riskReasons: ['too_fast'],
+            ipHint: null,
             replayLen: 1,
         });
 

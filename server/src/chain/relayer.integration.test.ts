@@ -166,6 +166,8 @@ describe('relayer + indexer (real anvil chain, real Phase 6 contracts)', () => {
             deathCause: 'test',
             durationMs: 5000,
             suspicious: false,
+            riskReasons: [],
+            ipHint: null,
             replayLen: 20,
         });
         expect(isPersonalBest).toBe(true);

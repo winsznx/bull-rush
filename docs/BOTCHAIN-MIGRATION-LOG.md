@@ -670,4 +670,47 @@ anywhere yet (Phase 15), so a claim button would be dead code against no address
 real deployment (Phase 15), a season scheduler (admin-triggered interim, same pattern as grid
 opening), sponsor ERC20 season runs (vault's ERC20 path already covered by Foundry tests).
 
+## Phase 11 — Behavioral risk signals
+
+The layer above the architectural anti-cheat: signals for behavior that produces genuinely
+valid replays by illegitimate means. Signals **shadow-hold, never hard-reject** — a behavioral
+signal is a probability, so its consequence is `risk_hold` (recorded, boardless, zero reward
+points, submitter told nothing), and a false positive costs a review, not an honest player.
+
+**`server/src/behavior.ts`** (pure, no I/O): the Phase 2 cadence heuristic moved here verbatim
+(practice + grid now share one definition), duration bounds, and the perturbed-copy detector
+ADR 0009 deferred here — tolerance-based LCS over the input trace (action equal + ticks within
+±3; ≥0.85 of max length = near-duplicate). Insertion-tolerant, so decoy taps don't break
+alignment; the decisive asymmetry is that independent humans never agree tick-exactly on ≥85%
+of a log while a perturbed copy must. Candidates pre-filtered by same-grid + replay length and
+outcome within ±15% (a copy necessarily lands near its source), bounding the O(n·m) DP.
+
+**Migration `0009_risk_signals.sql`**: `verified_runs.risk_reasons text[]` (evidence for Phase
+12 review, not a bare boolean) + `ip_hint` (first 16 hex of `sha256(salt:ip)`, NULL unless
+`IP_HINT_SALT` is set — never a raw IP). **Escalation**: 3 holds in 7 days →
+`users.risk_state = 'flagged'` — a review marker with deliberately zero automated consequence.
+**Sybil visibility**: grids where ≥2 wallets share a network origin surface in
+`GET /api/admin/risk` (held runs + reasons, flagged users, clusters) — review signals only;
+households share IPs.
+
+**Two floors, deliberately different**: cadence keeps 30 inputs (variance needs a sample);
+similarity runs from 15 — because the live E2E script *found the gap*: a perturbed copy of a
+28-input leader run sailed under the original shared floor of 30. Lowered, re-run, shadow-held.
+
+**Testing — genuinely run, including the live attack:**
+- `behavior.test.ts` (14, pure) + `behavior.integration.test.ts` (4, real Postgres+Redis):
+  jittered copy of a stored replay caught via the real candidates query; reasons persist and
+  surface; 3 holds flags a user, 2 don't; ip_hint clusters surface.
+- **Live over real HTTP** (`npm run local:verify:grid`, extended): the perturbed-copy attack —
+  ghost log stolen, ticks nudged so the hash changes, submitted through a fresh ticket —
+  returns `ok:true, hidden:true`: shadow-held, no runId, copier told nothing. Exact-copy 409
+  and every prior loop stage still pass.
+- Fresh-DB proof: all 9 migrations from nothing → 28/28 integration (+4). Full regression:
+  typechecks clean, `sim:check` clean, 87/87 unit (+14), 35/35 sim (fingerprint unchanged),
+  full build.
+
+**Not done in Phase 11** (see ADR 0011): automated penalties of any kind (Phase 12's human
+review decides), cross-grid behavioral profiling / reaction-time analysis (the reasons array
+is where it would land), practice-path similarity (random seeds — nothing to copy).
+
 <!-- Append future phase entries below this line, in commit order. -->

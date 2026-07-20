@@ -111,6 +111,8 @@ describe('Daily Grid lifecycle (real Postgres + Redis)', () => {
             deathCause: 'test',
             durationMs: 1000,
             suspicious: false,
+            riskReasons: [],
+            ipHint: null,
             replayLen: 10,
         };
 
@@ -153,6 +155,8 @@ describe('Daily Grid lifecycle (real Postgres + Redis)', () => {
             deathCause: 'test',
             durationMs: 1000,
             suspicious: false,
+            riskReasons: [],
+            ipHint: null,
             replayLen: 10,
         });
         // a fresh personal best is enqueued for an on-chain receipt immediately —
@@ -195,6 +199,8 @@ describe('Daily Grid lifecycle (real Postgres + Redis)', () => {
             deathCause: 'test',
             durationMs: 1000,
             suspicious: false,
+            riskReasons: [],
+            ipHint: null,
             replayLen: 10,
         });
 
@@ -213,6 +219,8 @@ describe('Daily Grid lifecycle (real Postgres + Redis)', () => {
             deathCause: 'test',
             durationMs: 1000,
             suspicious: false,
+            riskReasons: [],
+            ipHint: null,
             replayLen: 10,
         });
         expect(status).toBe('verified');
@@ -241,6 +249,8 @@ describe('Daily Grid lifecycle (real Postgres + Redis)', () => {
             deathCause: 'test',
             durationMs: 1000,
             suspicious: false,
+            riskReasons: [],
+            ipHint: null,
             replayLen: 4,
         };
         const lt = await issueTicket(leader, grid.id);
@@ -315,6 +325,8 @@ describe('Daily Grid lifecycle (real Postgres + Redis)', () => {
             deathCause: 'test',
             durationMs: 1000,
             suspicious: false,
+            riskReasons: [],
+            ipHint: null,
             replayLen: 10,
         };
         const ot = await issueTicket(original, grid.id);

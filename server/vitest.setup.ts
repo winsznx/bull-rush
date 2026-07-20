@@ -4,3 +4,4 @@
 process.env.DATABASE_URL ??= 'postgresql://postgres:bullrush@localhost:5432/bullrush';
 process.env.DATABASE_SSL ??= 'false';
 process.env.REDIS_URL ??= 'redis://localhost:6379';
+process.env.IP_HINT_SALT ??= 'test-ip-hint-salt';
