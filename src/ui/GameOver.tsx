@@ -129,7 +129,11 @@ Every run is replay-verified. Same grid. Prove the run.
                 if (cancelled) return;
                 if (res) setRunStatus(res);
                 attempts += 1;
-                if (res?.status === 'confirmed' || attempts >= RECEIPT_POLL_MAX_ATTEMPTS) return;
+                // Stop on any resting state. 'confirmed' is the end of the receipt
+                // path; 'verified' means no receipt was queued at all (default
+                // policy) so polling it again can only ever return the same thing.
+                const resting = res?.status === 'confirmed' || res?.status === 'verified';
+                if (resting || attempts >= RECEIPT_POLL_MAX_ATTEMPTS) return;
                 timer = setTimeout(poll, RECEIPT_POLL_MS);
             });
         };
@@ -182,8 +186,15 @@ Every run is replay-verified. Same grid. Prove the run.
                             </a>
                         ) : runStatus.status === 'submitted' ? (
                             'RECEIPT SUBMITTED…'
-                        ) : (
+                        ) : runStatus.status === 'receipt_queued' ? (
                             'RECEIPT QUEUED…'
+                        ) : (
+                            /* 'verified' with no receipt queued is the resting state
+                               under the default receipt policy (server/src/receiptPolicy.ts):
+                               the run IS verified, it simply gets no individual on-chain
+                               receipt. Saying "QUEUED" here would promise something that
+                               is never coming. */
+                            'RUN VERIFIED ✓'
                         )}
                     </div>
                 )}
