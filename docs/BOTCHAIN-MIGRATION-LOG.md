@@ -801,4 +801,39 @@ replaced; `migrate.ts` keeps `console.log` deliberately (CLI output for a human,
 today's question; revisit with real traffic), Sentry/APM integration (no account to test
 against), a styled status page (the JSON surface is the substance; rendering can come free).
 
+## Phase 14 — CI/CD: secret scanning + release gate
+
+Closes the gaps a real release process needs on top of the CI that's grown since Phase 2.
+
+**Secret scan (`gitleaks`, full history).** First scan surfaced 155 findings; triaged every
+one: 151 are vendored OpenZeppelin test fixtures (published vectors / dummy keys — allowlisted
+by path), 3 are the same public anvil dev key #0 used only against local anvil (allowlisted by
+value), 1 is a documented `local-admin-key` doc placeholder (real value only in gitignored
+`.env`). **Nothing real was leaked** — consistent with the project's throwaway-wallet discipline
+from Phase 0 on. `.gitleaks.toml` carries a one-line justification per allowlist entry; anything
+NEW fails CI until a human removes it or justifies it. Zero findings after allowlisting, on both
+history and the 63 MB working tree.
+
+**`npm run release:check`** — one command running every gate in the checklist's order (secret
+scan → typechecks → sim:check → unit → sim+fingerprint → forge fmt/test → integration → build),
+stopping at the first failure, restoring the local mp3s in a `finally` even on failure.
+Deliberately mirrors CI so the operator runs the identical set locally at release time. Run
+end-to-end: **all 10 gates green, exit 0.**
+
+**CI** (`.github/workflows/ci.yml`): new `secrets` job (full-history gitleaks with the config);
+a concurrency group so a superseded push cancels its in-flight run; existing
+game/server/integration/contracts jobs unchanged.
+
+**`docs/RELEASE-CHECKLIST.md`** — the written procedure: run the gate, **migrate before
+deploying code** (the server refuses to boot on pending migrations, so a skipped step fails
+loudly — ADR 0005), deploy order, env-vars-first, post-deploy `/status`+metrics+audit checks,
+and rollback (code rolls back freely since migrations are additive; migrations fix forward,
+never down; Redis rebuilds from Postgres).
+
+**Not done in Phase 14** (see ADR 0014): a provisioned staging environment (touches the prod
+Railway account — operator decision; named in the checklist as a gap, local stack is
+pre-production until then), automated deploy-on-merge (checklist is written so each step becomes
+a pipeline stage without redesign), signed-commit/branch-protection policy (repo admin, not
+code).
+
 <!-- Append future phase entries below this line, in commit order. -->

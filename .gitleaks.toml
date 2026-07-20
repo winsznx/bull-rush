@@ -1,0 +1,21 @@
+# Secret-scan config (gitleaks). Default rules extended with a narrow allowlist —
+# every entry below is individually justified; anything new the scanner finds is
+# a CI failure until a human either removes the secret or adds a justified entry.
+title = "bull-rush gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Vendored dependency test fixtures (OpenZeppelin) — public dummy keys and published test vectors, not this project's secrets."
+paths = ['''contracts/lib/.*''']
+
+[[allowlists]]
+description = "anvil/hardhat well-known development key #0 (mnemonic 'test test ... junk') — deliberately public, used only against local anvil in tests; holds no value on any real network."
+regexTarget = "secret"
+regexes = ['''ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80''']
+
+[[allowlists]]
+description = "Documented local-dev placeholder admin key in examples — the value only exists in gitignored local .env files."
+regexTarget = "line"
+regexes = ['''local-admin-key''']

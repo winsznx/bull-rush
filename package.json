@@ -20,7 +20,8 @@
     "local:db:down": "docker compose down",
     "local:api": "cd server && node --env-file=.env --import tsx src/index.ts",
     "local:verify": "npx tsx scripts/verify-local.ts",
-    "local:verify:grid": "npx tsx scripts/verify-grid-local.ts"
+    "local:verify:grid": "npx tsx scripts/verify-grid-local.ts",
+    "release:check": "node scripts/release-check.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",
