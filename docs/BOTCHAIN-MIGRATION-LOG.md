@@ -836,4 +836,49 @@ pre-production until then), automated deploy-on-merge (checklist is written so e
 a pipeline stage without redesign), signed-commit/branch-protection policy (repo admin, not
 code).
 
+## Phase 15 — BOT Chain mainnet deployment
+
+**The contracts are live on BOT Chain mainnet (677), verified on BOTScan.** Full evidence:
+`docs/MAINNET-DEPLOYMENT.md`. Decisions: ADR 0015.
+
+| Contract | Address |
+|---|---|
+| `DailyGridRegistry` | `0x9794a7E9bECE87dEe375fE6Eb55620f8Aa788172` |
+| `VerifiedRunRegistry` | `0xcce26fFAd015ee01A4c0BEe9aaEd28C9785D43aF` |
+| `SeasonPrizeVault` | `0x50D4129474c6204c870c7F141B9A6BE68264b6Ee` |
+
+Blocks 16,757,449–451; all receipts `status 0x1`; 2,274,966 gas; **0.108332 BOT** spent
+(0.798330 → 0.689998).
+
+**Gating, in order:** `eth_chainId` re-confirmed `0x2a5`=677 live (never from memory);
+`npm run release:check` **all 10 green**; dry-run simulation against real mainnet state
+succeeded (est. 0.14083 BOT vs 0.798330 available, ~5.7× headroom); only then `--broadcast`.
+
+**Deployer identity was resolved by evidence, not assumption.** `botspend/internal/keys.json`'s
+`deployer` is a *different*, unfunded account (`0xCc71…EB21`, 0.000000 BOT) — the testnet one.
+The real mainnet deployer, recovered from BotSpend's own 677 broadcast record, is
+`0x9fe816A8…aA5A`, the only funded address (0.798330 BOT); every other known BotSpend address
+was checked and empty. Deploying with keys.json's deployer would simply have failed on gas.
+
+**Post-deploy verification did not trust the deploy tool.** Receipts re-fetched from chain;
+`eth_getCode` byte lengths compared against Phase 6's `forge build --sizes` — **exact match on
+all three** (2456/2849/3907), the strongest cheap proof the deployed bytecode is the tested
+bytecode; constructor state and wiring read via `cast call` (notably
+`VerifiedRunRegistry.gridRegistry()` → the real registry); verification status queried from the
+explorer API *after* submission rather than trusting `Response: OK`.
+
+**Key handling:** never printed, echoed, or written to a tracked file — read from a gitignored
+`.env.local` and passed through the environment. An earlier bulk-scan of BotSpend's files to
+locate the key was blocked by a permission guard; that block was respected, not circumvented,
+and the key was supplied directly instead. `gitleaks` over the full tree post-deploy: no leaks.
+
+**Deployment is not activation.** `CHAIN_RELAYER_ENABLED` is still unset everywhere, so
+`loadChainConfig()` returns `null` and no relayer runs. No season created or funded, no grid
+opened on-chain. `scheduler`/`relayer` point at the deployer for now and are rotatable via
+owner-only `setScheduler`/`setRelayer` without redeploying (ADR 0006's whole point) — rotate to
+dedicated hot keys before running the relayer unattended.
+
+**Remaining before real players earn real rewards:** rotate hot keys, enable the relayer with
+its own key, create + fund Season Zero, open the first on-chain grid.
+
 <!-- Append future phase entries below this line, in commit order. -->
