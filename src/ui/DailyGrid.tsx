@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
+import { formatEther } from 'viem';
 import { useGameStore } from '../store';
 import { buildGhostTrace } from '../sim/ghost';
 import { useAuth } from '../wallet/useAuth';
 import { getCurrentGrid, getGridLeaderboard, getGridGhost, requestGridTicket, type GridInfo, type GridLbEntry } from '../gridApi';
+import { getMyRewards, type MyReward } from '../rewardsApi';
 
 function fmtCountdown(ms: number): string {
     if (ms <= 0) return 'now';
@@ -16,6 +18,10 @@ function truncateAddress(addr: string): string {
     return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
+function fmtBot(amountWei: string): string {
+    return Number(formatEther(BigInt(amountWei))).toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
 export function DailyGrid() {
     const reset = useGameStore((s) => s.reset);
     const startGridRun = useGameStore((s) => s.startGridRun);
@@ -24,6 +30,7 @@ export function DailyGrid() {
     const [grid, setGrid] = useState<GridInfo | null | undefined>(undefined);
     const [verifiedPlayers, setVerifiedPlayers] = useState(0);
     const [board, setBoard] = useState<GridLbEntry[]>([]);
+    const [rewards, setRewards] = useState<MyReward[]>([]);
     const [rejection, setRejection] = useState<string | null>(null);
     const [requesting, setRequesting] = useState(false);
     const [now, setNow] = useState(Date.now());
@@ -42,6 +49,17 @@ export function DailyGrid() {
             clearInterval(t);
         };
     }, []);
+
+    // Entitlements exist only after a season closes — a fetch that returns
+    // nothing (guest, no seasons yet, no placement) renders nothing.
+    useEffect(() => {
+        if (!session.authenticated) return;
+        let alive = true;
+        void getMyRewards().then((r) => alive && setRewards(r));
+        return () => {
+            alive = false;
+        };
+    }, [session.authenticated]);
 
     const enter = async (raceLeader = false) => {
         if (!grid) return;
@@ -126,6 +144,19 @@ export function DailyGrid() {
                                     </li>
                                 ))}
                             </ol>
+                        )}
+
+                        {rewards.length > 0 && (
+                            <div className="rewards">
+                                <div className="rewards-title">VERIFIED SKILL REWARDS</div>
+                                {rewards.map((r) => (
+                                    <div key={`${r.seasonId}-${r.merkleIndex}`} className="reward-row">
+                                        <span className="nm">{r.seasonName}</span>
+                                        <span className="ds">{fmtBot(r.amountWei)} BOT</span>
+                                        <span className="rk">{r.status.replace(/_/g, ' ').toUpperCase()}</span>
+                                    </div>
+                                ))}
+                            </div>
                         )}
 
                         {(rejection || error) && (

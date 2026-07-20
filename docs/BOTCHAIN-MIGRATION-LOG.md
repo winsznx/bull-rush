@@ -616,4 +616,58 @@ phantom placed at the player's CURRENT tick (lockstep, not wall-clock); `Hud` sh
 client race-your-own-best button (server path exists and is tested; UI deferred), and any ghost
 for practice runs (ghosts are grid-only by definition — only grid runs are verified).
 
+## Phase 10 — Season Zero: reward design + Merkle entitlements
+
+The layer between verified runs and the funded vault: who earned what, committed once, provable
+by anyone. Bound by the locked economy decisions — no token, no emissions, pre-funded capped
+pools, rewards only for independently verified performance, rules published before competition.
+
+**Rules first**: `docs/SEASON-ZERO.md` publishes the complete season structure before anything
+opens — per-grid points table (`[40,25,15,8,5,3,1,1,1,1]` for positions 1-10),
+points-proportional pool split with floor division (dust stays in the vault, stated openly),
+verified-runs-only eligibility, risk_hold = zero points, both claim paths (relayer `claimFor` +
+self-claim fallback), and a "verify it yourself" section.
+
+**Server**: migration `0008_seasons.sql` (seasons table + one-claim-per-user-per-season and
+per-season merkle_index uniques). `rewards.ts` — pure math, no I/O: points, entitlements,
+`buildSeasonTree` via `@openzeppelin/merkle-tree`'s StandardMerkleTree, which produces exactly
+SeasonPrizeVault's `keccak256(bytes.concat(keccak256(abi.encode(account, amount))))` leaf
+(proven by a hand-computed viem vector AND by real on-chain claims — below). `seasons.ts` — DB
+flow: `createSeason`, `closeSeason` (atomic close-once via `UPDATE ... WHERE status='draft'`;
+refuses while the window is open, no force flag; standings from **Postgres, never Redis** — a
+payout must derive from the durable record, not a rebuildable display cache; ties break
+deterministically), `getRewardsForUser` (proofs rebuilt from the claim rows on every request and
+cross-checked against the committed root — tampered rows throw instead of serving proofs). New
+endpoints: `GET /api/season/current` (public), `GET /api/rewards/me` (session),
+`POST /api/admin/season/create|close`.
+
+**Client**: `rewardsApi.ts` + a VERIFIED SKILL REWARDS section in the DailyGrid panel listing
+entitlements (season, amount in BOT, status). Display-only by design — no vault is deployed
+anywhere yet (Phase 15), so a claim button would be dead code against no address.
+
+**Testing — genuinely run, including funds moving on a real chain:**
+- `rewards.test.ts` (9, pure) — split math, floor-never-exceeds-pool, determinism, leaf vector.
+- `seasons.integration.test.ts` (3, real Postgres + anvil running the actual compiled
+  SeasonPrizeVault bytecode): three seeded players → close → correct floor amounts →
+  createSeason/publishMerkleRoot/fundNative on-chain → **every TypeScript-built proof claims
+  successfully, exact balance deltas verified, double-claim reverts** — the cross-implementation
+  proof that the TS tree and the Solidity verifier agree; close rejections; a flagged 99,999m
+  run earns nothing.
+- **Live over real HTTP** (`npm run local:verify:grid`): season created, grid pulled into its
+  window, closed, `GET /api/rewards/me` returns the sole player's full pool with the matching
+  root. Bonus finding: the script initially tripped the REAL `botLike` gate — its
+  perfectly-regular 19-tick synthetic cadence got `risk_hold`'d the moment a run survived past
+  the heuristic's 30-input floor (earlier, shorter runs had slipped under it). Fixed by
+  jittering the cadence; logged as live evidence the behavioral gate fires on machine-regular
+  input.
+- Fresh-DB proof: wiped volume → all 8 migrations from nothing → 24/24 integration (+3).
+- Full regression: `tsc --noEmit` clean both packages; `sim:check` clean; `npm test` 73/73 (+9);
+  `sim:test` 35/35, fingerprint unchanged; full `npm run build`. Dependency triage for
+  `@openzeppelin/merkle-tree`'s transitive `uuid` audit finding documented in ADR 0010
+  (unreachable code path, same method as ADR 0004).
+
+**Not done in Phase 10** (see ADR 0010): on-chain root publication/funding/claimFor against a
+real deployment (Phase 15), a season scheduler (admin-triggered interim, same pattern as grid
+opening), sponsor ERC20 season runs (vault's ERC20 path already covered by Foundry tests).
+
 <!-- Append future phase entries below this line, in commit order. -->

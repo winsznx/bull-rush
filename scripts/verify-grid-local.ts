@@ -34,13 +34,18 @@ async function playRun(seed: `0x${string}`, runId: string): Promise<RunReplay> {
     const presses: Act[] = [];
     for (let k = 0; k < 800; k++) presses.push(k % 4 === 0 ? Act.Dash : k % 2 === 0 ? Act.Left : Act.Right);
     const JIT = [16, 33, 8, 24, 40, 12, 20, 17];
+    // Input cadence must vary like a human's: a perfectly regular gap has
+    // near-zero variance and the server's botLike heuristic (correctly) flags
+    // it once the log passes 30 inputs — this script tripped its own anti-cheat
+    // with a fixed 19-tick cadence before this jitter existed.
+    const GAP = [13, 27, 18, 34, 15, 22, 41, 17, 25, 19];
     let f = 0;
     let nextT = 25;
     let pi = 0;
     while (runner.alive && runner.tick < 18000) {
         if (runner.tick >= nextT && pi < presses.length) {
             runner.input(presses[pi++]);
-            nextT += 19;
+            nextT += GAP[pi % GAP.length];
         }
         runner.advance(JIT[f++ % JIT.length] / 1000);
     }
@@ -91,33 +96,40 @@ async function main() {
     console.log('siwe verify:', verifyRes.status, JSON.stringify(verifyBody));
     if (!verifyRes.ok) throw new Error('SIWE verify failed — aborting');
 
-    // 2. Open (or reuse) today's grid, back-date it open for tickets (test-only
-    // shortcut — production waits out the real 5-minute inspection delay).
-    const dayId = `verify-grid-local-${randomBytes(4).toString('hex')}`;
-    const openRes = (await (await api(`/api/admin/grid/open?dayId=${dayId}`, {
-        method: 'POST',
-        headers: { 'x-admin-key': KEY },
-    })).json()) as { grid: { id: string; seed: `0x${string}` } };
-    console.log('opened grid:', dayId, openRes.grid.id);
+    // 2+3. Open a grid, back-date it open for tickets (test-only shortcut —
+    // production waits out the real 5-minute inspection delay), get a ticket,
+    // and play a run. The scripted input pattern occasionally dies in under the
+    // server's 1.5-second suspicious-run floor on an unlucky seed — that's the
+    // anti-cheat working as designed, not a failure — so reroll a fresh grid
+    // (fresh seed) until the bot survives long enough to be a valid submission.
+    let openRes!: { grid: { id: string; seed: `0x${string}` } };
+    let ticketRes!: { ticket?: { id: string; seed: `0x${string}` }; error?: string };
+    let replay!: RunReplay;
+    for (let attempt = 1; attempt <= 6; attempt++) {
+        const dayId = `verify-grid-local-${randomBytes(4).toString('hex')}`;
+        openRes = (await (await api(`/api/admin/grid/open?dayId=${dayId}`, {
+            method: 'POST',
+            headers: { 'x-admin-key': KEY },
+        })).json()) as { grid: { id: string; seed: `0x${string}` } };
+        console.log('opened grid:', dayId, openRes.grid.id);
+        execSync(
+            `docker compose exec -T postgres psql -U postgres -d bullrush -c "UPDATE daily_grids SET opens_at = now() - interval '1 minute' WHERE id = '${openRes.grid.id}'"`,
+            { cwd: new URL('..', import.meta.url).pathname, stdio: 'pipe' },
+        );
 
-    // Back-date the real 5-minute inspection delay for this test grid only —
-    // same shortcut server/src/grid.integration.test.ts uses, direct against the
-    // local docker-compose Postgres.
-    execSync(
-        `docker compose exec -T postgres psql -U postgres -d bullrush -c "UPDATE daily_grids SET opens_at = now() - interval '1 minute' WHERE id = '${openRes.grid.id}'"`,
-        { cwd: new URL('..', import.meta.url).pathname, stdio: 'pipe' },
-    );
+        ticketRes = (await (await api('/api/grid/ticket', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ gridId: openRes.grid.id }),
+        })).json()) as { ticket?: { id: string; seed: `0x${string}` }; error?: string };
+        if (!ticketRes.ticket) throw new Error(`ticket request failed: ${ticketRes.error}`);
 
-    // 3. Request a ticket, then play and submit a real run.
-    const ticketRes = (await (await api('/api/grid/ticket', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ gridId: openRes.grid.id }),
-    })).json()) as { ticket?: { id: string; seed: `0x${string}` }; error?: string };
+        replay = await playRun(ticketRes.ticket.seed, ticketRes.ticket.id);
+        if (replay.ticks >= 150) break; // survived >= 2.5s — clears the 1.5s floor
+        console.log(`bot died too fast on this seed (${replay.ticks} ticks) — rerolling grid`);
+    }
     console.log('ticket:', JSON.stringify(ticketRes));
-    if (!ticketRes.ticket) throw new Error(`ticket request failed: ${ticketRes.error}`);
-
-    const replay = await playRun(ticketRes.ticket.seed, ticketRes.ticket.id);
+    if (!ticketRes.ticket) throw new Error('no viable ticket after rerolls');
     const submitRes = (await (await api('/api/grid/submit', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -173,10 +185,48 @@ async function main() {
     const copyRejected = copyRes.status === 409 && copyBody.error === 'duplicate_replay';
     console.log('copy attack:', copyRes.status, JSON.stringify(copyBody));
 
-    const ok = statusOk && ghostOk && copyRejected;
+    // 7. Season Zero lifecycle, live: create a season, pull this grid into its
+    // (already-ended) window, close it, and fetch our own entitlement + proof.
+    const seasonId = `verify-season-${randomBytes(4).toString('hex')}`;
+    const capWei = '1000000000000000000'; // 1 BOT pool
+    const base = Date.now() - 900 * 24 * 3_600_000;
+    const createSeasonRes = await api(`/api/admin/season/create`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-admin-key': KEY },
+        body: JSON.stringify({
+            id: seasonId,
+            name: 'Verify Season',
+            asset: '0x0000000000000000000000000000000000000000',
+            capWei,
+            startsAt: base,
+            endsAt: base + 24 * 3_600_000,
+        }),
+    });
+    if (!createSeasonRes.ok) throw new Error('season create failed');
+    execSync(
+        `docker compose exec -T postgres psql -U postgres -d bullrush -c "UPDATE daily_grids SET created_at = to_timestamp(${Math.floor((base + 3_600_000) / 1000)}) WHERE id = '${openRes.grid.id}'"`,
+        { cwd: new URL('..', import.meta.url).pathname, stdio: 'pipe' },
+    );
+    const closeRes = (await (await api(`/api/admin/season/close?id=${seasonId}`, {
+        method: 'POST',
+        headers: { 'x-admin-key': KEY },
+    })).json()) as { ok?: boolean; root?: string; claimCount?: number; totalAllocatedWei?: string; error?: string };
+    console.log('season close:', JSON.stringify(closeRes));
+    if (!closeRes.ok) throw new Error(`season close failed: ${closeRes.error}`);
+
+    const rewardsRes = (await (await api('/api/rewards/me')).json()) as {
+        ok?: boolean;
+        rewards?: { seasonId: string; amountWei: string; status: string; merkleRoot: string; proof: string[] }[];
+    };
+    const myReward = rewardsRes.rewards?.find((r) => r.seasonId === seasonId);
+    console.log('my reward:', JSON.stringify(myReward));
+    // Sole verified player in the season -> the full (floored) pool.
+    const rewardOk = !!myReward && myReward.amountWei === capWei && myReward.status === 'eligible' && myReward.merkleRoot === closeRes.root;
+
+    const ok = statusOk && ghostOk && copyRejected && rewardOk;
     console.log(
         ok
-            ? '\n✅ WALLET + GRID + RECEIPT-STATUS + VERIFIED-GHOST + ANTI-COPY LOOP WORKS\n'
+            ? '\n✅ WALLET + GRID + RECEIPT-STATUS + VERIFIED-GHOST + ANTI-COPY + SEASON-REWARDS LOOP WORKS\n'
             : '\n⚠️ unexpected result — check server logs\n',
     );
 }

@@ -41,6 +41,7 @@ import {
 import { listChainJobs } from './chain/outbox.ts';
 import { drainJobs, startRelayerLoop } from './chain/relayer.ts';
 import { loadChainConfig } from './chain/client.ts';
+import { createSeason, closeSeason, getLatestSeason, getRewardsForUser } from './seasons.ts';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import {
     issueNonce,
@@ -540,6 +541,78 @@ app.get('/api/grid/:id/ghost', async (c) => {
     const ghost = await getGridGhost(c.req.param('id'), identityKey);
     if (!ghost) return c.json({ error: 'no_ghost_available' }, 404);
     return c.json({ ok: true, ghost });
+});
+
+// Public season visibility — anyone can see the current season's rules-critical
+// numbers (asset, cap, window, committed root) without a session. "Publicly
+// visible, capped, rules before competition" is a locked product decision.
+app.get('/api/season/current', async (c) => {
+    const season = await getLatestSeason();
+    if (!season) return c.json({ season: null });
+    return c.json({
+        season: {
+            id: season.id,
+            name: season.name,
+            asset: season.asset,
+            capWei: season.cap_wei,
+            startsAt: season.starts_at.getTime(),
+            endsAt: season.ends_at.getTime(),
+            claimWindowEnd: season.claim_window_end ? season.claim_window_end.getTime() : null,
+            merkleRoot: season.merkle_root,
+            status: season.status,
+        },
+    });
+});
+
+// The caller's own entitlements, each with a freshly rebuilt Merkle proof
+// (recomputed from the season's claims rows and checked against the committed
+// root on every request — see server/src/seasons.ts).
+app.get('/api/rewards/me', async (c) => {
+    const session = await requireGridSession(c);
+    if (!session) return c.json({ error: 'not_authenticated' }, 401);
+    const rewards = await getRewardsForUser(session.userId);
+    return c.json({ ok: true, rewards });
+});
+
+const SeasonCreateSchema = z.object({
+    id: z.string().regex(/^[a-z0-9-]{3,40}$/),
+    name: z.string().min(3).max(80),
+    asset: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+    capWei: z.string().regex(/^[0-9]+$/),
+    startsAt: z.number().int(),
+    endsAt: z.number().int(),
+    claimWindowEnd: z.number().int().optional(),
+});
+
+app.post('/api/admin/season/create', async (c) => {
+    const key = process.env.ADMIN_KEY;
+    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const parsed = SeasonCreateSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
+    const b = parsed.data;
+    if (b.endsAt <= b.startsAt) return c.json({ error: 'invalid_window' }, 400);
+    const season = await createSeason({
+        id: b.id,
+        name: b.name,
+        asset: b.asset,
+        capWei: BigInt(b.capWei),
+        startsAt: new Date(b.startsAt),
+        endsAt: new Date(b.endsAt),
+        claimWindowEnd: b.claimWindowEnd ? new Date(b.claimWindowEnd) : undefined,
+    });
+    return c.json({ ok: true, season: { id: season.id, status: season.status } });
+});
+
+// Close a season: compute entitlements from verified runs only, commit the
+// Merkle root, write eligible claim rows — refuses while the window is open.
+app.post('/api/admin/season/close', async (c) => {
+    const key = process.env.ADMIN_KEY;
+    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const id = c.req.query('id');
+    if (!id) return c.json({ error: 'bad_request' }, 400);
+    const result = await closeSeason(id);
+    if ('rejected' in result) return c.json({ error: result.rejected }, 409);
+    return c.json({ ok: true, root: result.root, claimCount: result.claimCount, totalAllocatedWei: result.totalAllocatedWei.toString() });
 });
 
 // Opens (or idempotently returns) the grid for a given day. Stands in for the

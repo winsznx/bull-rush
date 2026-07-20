@@ -9,6 +9,12 @@ export function toOnChainGridId(dayId: string): `0x${string}` {
     return keccak256(stringToHex(dayId));
 }
 
+// Same construction for SeasonPrizeVault's bytes32 seasonId — derived from the
+// public season id string (e.g. "season-zero"), re-derivable by anyone.
+export function toOnChainSeasonId(seasonId: string): `0x${string}` {
+    return keccak256(stringToHex(seasonId));
+}
+
 // Matches ADR 0006's recommended runId: keccak256(abi.encode(gridId, player, replayHash)).
 // The contract itself has no opinion on this scheme (it only requires a runId is never
 // reused) — this is the one place that choice is made, on the relayer side.
