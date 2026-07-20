@@ -6,6 +6,22 @@ Bull Rush is a **verifiable skill runner** built on BOT Chain. Every Daily Grid 
 
 **Play:** [trybullrush.xyz](https://trybullrush.xyz)
 
+## Onchain (BOT Chain mainnet, chain 677)
+
+| Contract | Address |
+|---|---|
+| `DailyGridRegistry` | [`0x9794a7E9bECE87dEe375fE6Eb55620f8Aa788172`](https://scan.botchain.ai/address/0x9794a7e9bece87dee375fe6eb55620f8aa788172) |
+| `VerifiedRunRegistry` | [`0xcce26fFAd015ee01A4c0BEe9aaEd28C9785D43aF`](https://scan.botchain.ai/address/0xcce26ffad015ee01a4c0bee9aaed28c9785d43af) |
+| `SeasonPrizeVault` | [`0x50D4129474c6204c870c7F141B9A6BE68264b6Ee`](https://scan.botchain.ai/address/0x50d4129474c6204c870c7f141b9a6be68264b6ee) |
+
+All three source-verified on BOTScan. Deployment evidence: [`docs/MAINNET-DEPLOYMENT.md`](docs/MAINNET-DEPLOYMENT.md).
+
+> **Status:** the contracts are live, but the migration branch
+> (`feat/botchain-mainnet-skill-rewards`) is **not yet deployed** — the production URL currently
+> serves the pre-migration build, and no relayer is running. See
+> [`docs/submission/TESTING-STATUS.md`](docs/submission/TESTING-STATUS.md) for exactly what is and
+> isn't live.
+
 ---
 
 ## Stack
@@ -19,12 +35,16 @@ Bull Rush is a **verifiable skill runner** built on BOT Chain. Every Daily Grid 
 ```
 src/                 # the game (R3F)
   three/             # Canvas, Bull, Track, Obstacles, Game
-  ui/                # HTML/CSS overlays (menu, gate, HUD, board, share)
-  data/              # questions, ranks, hazards
+  ui/                # HTML/CSS overlays (menu, tutorial, HUD, board, Daily Grid, share)
+  sim/               # deterministic engine (shared byte-identical with the server)
+  wallet/            # wagmi config, BOT Chain defs, SIWE, useAuth
+  data/              # ranks, hazards
   store.ts           # zustand game state + per-frame refs
   api.ts             # thin client for the API (offline-safe)
 functions/           # Cloudflare Pages Function (/s share page)
-server/              # the Hono API (routes, redis, postgres, anti-cheat, OG card)
+server/              # the Hono API (routes, redis, postgres, replay verification, chain relayer)
+  migrations/        # versioned SQL, applied explicitly (never at boot)
+contracts/           # Foundry: DailyGridRegistry, VerifiedRunRegistry, SeasonPrizeVault
 public/              # static assets (skybox, textures, logo, favicon, styles)
 ```
 
