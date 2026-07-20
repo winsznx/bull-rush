@@ -6,9 +6,10 @@ import { startRun } from './api';
 import { Game } from './three/Game';
 import { Hud } from './ui/Hud';
 import { Menu } from './ui/Menu';
-import { Gate } from './ui/Gate';
+import { Tutorial } from './ui/Tutorial';
 import { GameOverScreen } from './ui/GameOver';
 import { Board } from './ui/Board';
+import { DailyGrid } from './ui/DailyGrid';
 import { Cinematic } from './ui/Cinematic';
 import { MusicChip } from './ui/MusicChip';
 
@@ -53,11 +54,17 @@ export function App() {
         if (phase === 'playing') {
             Audio.unlock();
             Audio.cycleMusic();
-            // grab a server seed + one-time submit token (offline-safe)
-            void startRun().then(({ seed, token }) => {
-                refs.seed = seed;
-                refs.token = token;
-            });
+            // A Daily Grid run already carries its ticket-bound seed (set by
+            // store.startGridRun before this effect runs) — fetching a fresh
+            // practice seed here would silently replace the shared grid course
+            // with a random one, so skip it entirely for a grid attempt.
+            if (!refs.gridTicketId) {
+                // grab a server seed + one-time submit token (offline-safe)
+                void startRun().then(({ seed, token }) => {
+                    refs.seed = seed;
+                    refs.token = token;
+                });
+            }
         }
         if (phase === 'dead') Audio.sfx('death');
     }, [phase]);
@@ -73,9 +80,10 @@ export function App() {
             {phase === 'playing' && <Hud />}
             {phase === 'intro' && <Cinematic />}
             {phase === 'menu' && <Menu />}
-            {phase === 'gate' && <Gate />}
+            {phase === 'tutorial' && <Tutorial />}
             {phase === 'dead' && <GameOverScreen />}
             {phase === 'board' && <Board />}
+            {phase === 'grid' && <DailyGrid />}
             {phase === 'playing' && flashKey > 0 && <div key={flashKey} className="hitflash" />}
             {phase === 'playing' && cloudKey > 0 && (
                 <div key={`cloud-${cloudKey}`} className="cloudburst">

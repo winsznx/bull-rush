@@ -1,0 +1,25 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+solc = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+bytecode_hash = "none"
+via_ir = false
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+
+[rpc_endpoints]
+bot_mainnet = "https://rpc.botchain.ai"
+bot_testnet = "https://rpc.bohr.life"
+
+[etherscan]
+bot_mainnet = { key = "${SCAN_API_KEY}", url = "https://scan.botchain.ai/api", chain = 677 }
+bot_testnet = { key = "${SCAN_API_KEY}", url = "https://scan.bohr.life/api", chain = 968 }

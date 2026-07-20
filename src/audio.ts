@@ -14,7 +14,7 @@ export type Sfx =
     | 'charge'
     | 'death';
 
-// Radio modes — Ansem's tracks mapped to PRD mood slots.
+// Radio modes — mood slots, one licensed track each (see ASSET_PROVENANCE.md).
 export const TRACKS = [
     { mode: 'SUPER RUSH', src: '/assets/audio/music/super-rush.mp3' },
     { mode: 'BUTTERFLY WAR', src: '/assets/audio/music/butterfly-war.mp3' },

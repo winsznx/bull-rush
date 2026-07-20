@@ -12,28 +12,7 @@ export const sql = postgres(url, {
     ssl: process.env.DATABASE_SSL === 'true' ? 'require' : false,
 });
 
-export async function initSchema(): Promise<void> {
-    await sql`
-        CREATE TABLE IF NOT EXISTS runs (
-            id          uuid PRIMARY KEY,
-            name        text NOT NULL,
-            distance    integer NOT NULL,
-            score       integer NOT NULL,
-            rank        text NOT NULL,
-            death_cause text,
-            jeets_dodged integer DEFAULT 0,
-            snipers_survived integer DEFAULT 0,
-            mev_avoided integer DEFAULT 0,
-            max_combo   integer DEFAULT 0,
-            duration_ms integer DEFAULT 0,
-            wallet      text,
-            referrer    text,
-            suspicious  boolean DEFAULT false,
-            created_at  timestamptz DEFAULT now()
-        )
-    `;
-    await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS verified boolean DEFAULT false`;
-    await sql`ALTER TABLE runs ADD COLUMN IF NOT EXISTS replay_len integer DEFAULT 0`;
-    await sql`CREATE INDEX IF NOT EXISTS runs_distance_idx ON runs (distance DESC)`;
-    await sql`CREATE INDEX IF NOT EXISTS runs_created_idx ON runs (created_at DESC)`;
-}
+// Schema is managed by versioned migrations (server/migrations/*.sql, applied
+// via `npm run db:migrate` — see server/src/migrate.ts), not by code in this
+// file. This replaces the ad hoc boot-time `CREATE TABLE IF NOT EXISTS` calls
+// every table before Phase 5 was created with.

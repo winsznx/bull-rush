@@ -3,26 +3,34 @@ import { Audio } from '../audio';
 import { MilestoneBanner } from './Milestone';
 
 export function Menu() {
-    const enterGate = useGameStore((s) => s.enterGate);
+    const enterTutorial = useGameStore((s) => s.enterTutorial);
     const openBoard = useGameStore((s) => s.openBoard);
+    const openGridScreen = useGameStore((s) => s.openGridScreen);
     const begin = () => {
         Audio.unlock();
-        enterGate();
+        enterTutorial();
+    };
+    const grid = () => {
+        Audio.unlock();
+        openGridScreen();
     };
     return (
         <div className="menu">
             <div className="menu-hero" />
             <div className="menu-scrim" />
             <div className="menu-content">
-                <div className="kicker">THE LAND OF THE MEMECOINS</div>
+                <div className="kicker">VERIFIABLE ONCHAIN SKILL RUNNER</div>
                 <img className="logo" src="/logo.png" alt="BULL RUSH" />
-                <p className="sub">Ride The Black Bull ($ANSEM). Dodge jeets, snipers &amp; MEV. Charge as far as you can.</p>
+                <p className="sub">Same grid. Prove the run. Dodge Corrupted Nodes, collect Compute Cells, and charge as far as you can.</p>
                 <MilestoneBanner />
                 <button className="btn primary" onClick={begin}>
-                    ENTER THE GATE ▸
+                    CHARGE ▸
+                </button>
+                <button className="btn ghost" onClick={grid}>
+                    DAILY GRID
                 </button>
                 <button className="btn ghost" onClick={openBoard}>
-                    LEADERBOARD
+                    FINALITY BOARD
                 </button>
                 <div className="controls">
                     <span>◀ ▶ / A D — switch lane · SPACE / tap — dash</span>

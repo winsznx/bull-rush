@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A superseded push to the same ref cancels its in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: secret scan (gitleaks, full history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history — a secret committed then reverted is still leaked
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+  game:
+    name: game (typecheck, sim:check, test, sim:test, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # Installed so fast unit tests that happen to live under server/src (e.g.
+      # siwe.test.ts) can resolve their own dependencies regardless of which
+      # ones root's package.json also happens to carry.
+      - run: cd server && npm ci
+      # A fresh CI checkout never has the gitignored, unlicensed local music files,
+      # so this passes here by construction — it exists to catch a future deploy
+      # or commit that reintroduces them, not to pass by accident.
+      - run: npm run check-assets
+      - run: npm run typecheck
+      # Non-mutating: fails if server/src/sim/* has drifted from src/sim/* (i.e.
+      # someone edited the sim without running `npm run sim:sync`).
+      - run: npm run sim:check
+      - run: npm test
+      - run: npm run sim:test
+      - run: npm run build
+      # Informational only, not a hard gate — see docs/adr/0004-wallet-stack.md
+      # for the specific, assessed reason: the only current findings are in
+      # wagmi's optional metaMask()/walletConnect() connector modules, which
+      # this project never imports (only the bare injected() connector is
+      # used) and are confirmed absent from the built bundle. Tracked here so
+      # the finding stays visible rather than silently forgotten, and so a
+      # NEW, different finding shows up in CI output for a human to triage.
+      - run: npm audit || true
+
+  server:
+    name: server (typecheck)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+
+  integration:
+    name: grid + auth + relayer lifecycle (real Postgres + Redis + anvil)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: bullrush
+          POSTGRES_DB: bullrush
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      # anvil (relayer.integration.test.ts spawns it directly) + forge (to build the
+      # contracts/out/*.json artifacts that same test deploys from).
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge build
+        working-directory: contracts
+      - run: npm ci
+      - run: cd server && npm ci
+      - run: npm run db:migrate
+        env:
+          DATABASE_URL: postgresql://postgres:bullrush@localhost:5432/bullrush
+          DATABASE_SSL: 'false'
+      - run: npm run test:integration
+
+  contracts:
+    name: contracts (forge build + test, DailyGridRegistry/VerifiedRunRegistry/SeasonPrizeVault)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge fmt --check
+      - run: forge build
+      - run: forge test -vv

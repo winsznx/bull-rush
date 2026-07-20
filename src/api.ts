@@ -1,7 +1,13 @@
 // Thin client for the Railway API. Everything degrades gracefully: if VITE_API_URL
 // is unset or the backend is unreachable, the game still plays fully offline and
 // falls back to local high scores.
+//
+// Competitive submission is replay-only: the server derives distance/score/death
+// cause itself by re-simulating `replay` — this client never sends those as
+// trust-bearing fields. See src/sim/replay.ts + src/sim/verify.ts.
 import { activeSim } from './sim/active';
+import { REPLAY_SCHEMA_VERSION, type RunReplay } from './sim/replay';
+import { GAME_VERSION, RULESET_HASH } from './sim/ruleset';
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') || '';
 
@@ -17,18 +23,29 @@ export interface LbEntry {
 export interface SubmitPayload {
     token: string;
     name: string;
-    distance: number;
-    score: number;
-    durationMs: number;
-    deathCause?: string;
-    wallet?: string;
     ref?: string;
-    il?: number[];
-    ticks?: number;
+    wallet?: string;
+    replay: RunReplay;
 }
 
-function localSeed(): string {
-    return `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`;
+function localSeed(): `0x${string}` {
+    return `0x${Date.now().toString(16)}${Math.floor(Math.random() * 1e9).toString(16)}`;
+}
+
+/** Builds the canonical replay for the run currently in progress, or null if there
+ * is nothing valid to submit (no sim runner mounted, or it never received input). */
+export function buildReplay(runId: string): RunReplay | null {
+    const runner = activeSim.runner;
+    if (!runner || runner.log.length === 0) return null;
+    return {
+        schemaVersion: REPLAY_SCHEMA_VERSION,
+        gameVersion: GAME_VERSION,
+        rulesetHash: RULESET_HASH,
+        seed: runner.seed as `0x${string}`,
+        runId,
+        inputs: runner.log.map((ev) => ({ tick: ev.tick, action: ev.act })),
+        ticks: runner.tick,
+    };
 }
 
 // Share link on the GAME's own domain (a Cloudflare Pages Function at /s serves
@@ -39,37 +56,43 @@ export function shareLink(p: { distance: number; rank: string; name: string }): 
     return `${window.location.origin}/s?${q.toString()}`;
 }
 
-export async function startRun(): Promise<{ seed: string; token: string | null }> {
+export async function startRun(): Promise<{ seed: `0x${string}`; token: string | null }> {
     if (!BASE) return { seed: localSeed(), token: null };
     try {
         const r = await fetch(`${BASE}/api/run/start`, { method: 'POST' });
         if (!r.ok) throw new Error('start failed');
-        const d = (await r.json()) as { seed: string; token: string };
+        const d = (await r.json()) as { seed: `0x${string}`; token: string };
         return { seed: d.seed, token: d.token };
     } catch {
         return { seed: localSeed(), token: null };
     }
 }
 
-export async function submitRun(p: SubmitPayload): Promise<{ rank: string; position: number | null } | null> {
+export interface SubmitResult {
+    ok: boolean;
+    /** Present only when ok — every value here is server-derived, never the client's claim. */
+    rank?: string;
+    distance?: number;
+    score?: number;
+    deathCause?: string;
+    position?: number | null;
+    firstTo20k?: boolean;
+    /** Present when the replay was rejected outright (see src/sim/verify.ts). */
+    rejected?: string;
+}
+
+export async function submitRun(p: SubmitPayload): Promise<SubmitResult | null> {
     if (!BASE) return null;
-    // Attach the deterministic input log so the server can re-simulate + verify.
-    const body: SubmitPayload = { ...p };
-    const runner = activeSim.runner;
-    if (runner && runner.log.length > 0) {
-        const il: number[] = [];
-        for (const ev of runner.log) il.push(ev.tick, ev.act);
-        body.il = il;
-        body.ticks = runner.tick;
-    }
     try {
         const r = await fetch(`${BASE}/api/run/submit`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
+            body: JSON.stringify(p),
         });
-        if (!r.ok) return null;
-        return (await r.json()) as { rank: string; position: number | null };
+        const d = (await r.json().catch(() => null)) as SubmitResult | { error: string } | null;
+        if (!d) return null;
+        if ('error' in d) return { ok: false, rejected: d.error };
+        return d;
     } catch {
         return null;
     }
