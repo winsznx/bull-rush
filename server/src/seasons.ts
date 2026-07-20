@@ -80,7 +80,12 @@ export interface CloseSeasonResult {
 // Closes a season: computes entitlements from every grid opened inside the
 // window, builds the Merkle tree, and writes the root + eligible claim rows in
 // one transaction. Close-once is atomic (UPDATE ... WHERE status = 'draft').
-export async function closeSeason(seasonId: string): Promise<CloseSeasonResult | { rejected: CloseSeasonRejection }> {
+// `dryRun` computes everything (entitlements, tree, root) and writes NOTHING —
+// the operator preview a write-credentialed close is confirmed against.
+export async function closeSeason(
+    seasonId: string,
+    opts: { dryRun?: boolean } = {},
+): Promise<CloseSeasonResult | { rejected: CloseSeasonRejection }> {
     const season = await getSeason(seasonId);
     if (!season) return { rejected: 'season_not_found' };
     if (season.status !== 'draft') return { rejected: 'season_not_draft' };
@@ -111,6 +116,8 @@ export async function closeSeason(seasonId: string): Promise<CloseSeasonResult |
 
     const { root } = buildSeasonTree(resolved.map((r) => ({ account: r.account, amountWei: r.entitlement.amountWei })));
     const totalAllocatedWei = resolved.reduce((sum, r) => sum + r.entitlement.amountWei, 0n);
+
+    if (opts.dryRun) return { root, claimCount: resolved.length, totalAllocatedWei };
 
     const closed = await sql.begin(async (tx) => {
         const updated = await tx`

@@ -13,7 +13,7 @@ import { redis } from './redis.ts';
 import { dayIdFor, deriveGridSeed, gridWindowFor } from './sim/grid.ts';
 import { REPLAY_SCHEMA_VERSION } from './sim/replay.ts';
 import { GAME_VERSION, RULESET_HASH } from './sim/ruleset.ts';
-import { canTransitionTicket, type VerifiedRunStatus } from './stateMachines.ts';
+import { canTransitionTicket, canTransitionVerifiedRun, type VerifiedRunStatus } from './stateMachines.ts';
 import { enqueueChainJob } from './chain/outbox.ts';
 import { toOnChainGridId, toOnChainRunId } from './chain/onchainIds.ts';
 
@@ -482,4 +482,59 @@ export async function getRiskOverview(limit: number): Promise<RiskOverview> {
         flaggedUsers: flagged.map((r) => ({ identityKey: r.identity_key, heldCount: r.held_count })),
         sharedIpClusters: clusters.map((r) => ({ gridId: r.grid_id, ipHint: r.ip_hint, identities: r.identities })),
     };
+}
+
+// Operator release after manual review (Phase 12) — the ONLY path out of
+// risk_hold. Atomic compare-and-set, then the same personal-best/leaderboard/
+// receipt-queue tail a clean run would have gotten at record time: a wrongly
+// held run ends up exactly where it would have been, nothing more.
+export async function releaseHeldRun(runId: string): Promise<{ released: boolean; isPersonalBest?: boolean }> {
+    if (!canTransitionVerifiedRun('risk_hold', 'verified')) throw new Error('illegal verified_run transition: risk_hold -> verified');
+    const [row] = await sql<
+        { grid_id: string; identity_key: string; distance: number; score: number; replay_hash: string; game_version: string }[]
+    >`
+        UPDATE verified_runs SET status = 'verified'
+        WHERE id = ${runId} AND status = 'risk_hold'
+        RETURNING grid_id, identity_key, distance, score, replay_hash, game_version
+    `;
+    if (!row) return { released: false };
+
+    const prevBest = await redis.zscore(LB_GRID(row.grid_id), row.identity_key);
+    const isPersonalBest = prevBest === null || row.distance > Number(prevBest);
+    if (isPersonalBest) {
+        await redis.zadd(LB_GRID(row.grid_id), 'GT', row.distance, row.identity_key);
+
+        const [grid] = await sql<{ day_id: string }[]>`SELECT day_id FROM daily_grids WHERE id = ${row.grid_id}`;
+        const wallet = row.identity_key.split(':')[1] as Address;
+        const onChainGridId = toOnChainGridId(grid.day_id);
+        const onChainRunId = toOnChainRunId(onChainGridId, wallet, row.replay_hash as `0x${string}`);
+        const { enqueued } = await enqueueChainJob('record_run', `record_run:${onChainRunId}`, {
+            verifiedRunId: runId,
+            runId: onChainRunId,
+            onChainGridId,
+            player: wallet,
+            replayHash: row.replay_hash,
+            distance: row.distance,
+            score: row.score,
+            gameVersion: row.game_version,
+        });
+        if (enqueued) {
+            await sql`UPDATE verified_runs SET status = 'receipt_queued' WHERE id = ${runId} AND status = 'verified'`;
+        }
+    }
+
+    return { released: true, isPersonalBest };
+}
+
+// Clears a repeat-offender review marker after a human decided the holds were
+// false positives. Only ever flagged -> none; an operator cannot "pre-clear"
+// or otherwise write arbitrary states.
+export async function clearUserRiskState(identityKey: string): Promise<boolean> {
+    const [chainIdStr, wallet] = identityKey.split(':');
+    const rows = await sql`
+        UPDATE users SET risk_state = 'none'
+        WHERE chain_id = ${Number(chainIdStr)} AND wallet_address = ${wallet} AND risk_state = 'flagged'
+        RETURNING id
+    `;
+    return rows.length > 0;
 }

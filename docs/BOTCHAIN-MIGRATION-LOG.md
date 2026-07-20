@@ -713,4 +713,50 @@ similarity runs from 15 — because the live E2E script *found the gap*: a pertu
 review decides), cross-grid behavioral profiling / reaction-time analysis (the reasons array
 is where it would land), practice-path similarity (random seeds — nothing to copy).
 
+## Phase 12 — Admin/ops security hardening
+
+Replaces the bare `header !== ADMIN_KEY` model every admin route used through Phase 11, and
+builds the manual-review workflow Phase 11's risk signals were collecting evidence for.
+
+**`server/src/adminAuth.ts`** (pure) — constant-time key comparison (`timingSafeEqual` over
+sha256 digests, so neither content nor length leaks), read/write role separation
+(`ADMIN_WRITE_KEY`/`ADMIN_READ_KEY`, write implies read, legacy `ADMIN_KEY` still resolves as
+write for deployment continuity but is superseded the moment the new key is set), and
+parameter fingerprints. **`server/src/adminConfirm.ts`** — Redis-backed confirm tokens:
+5-minute TTL, single-use by construction (GETDEL before validation — a mismatch attempt burns
+the token), bound to the exact action + parameters. **`server/src/audit.ts`** — first real
+writer to the `audit_logs` table (schema-ready since migration 0006, never written until now);
+best-effort by design (a broken audit table must never take season closing down).
+
+**Endpoints**: all 13 admin routes now role-gated with per-IP brute-force damping on failures;
+`stats`/`risk`/`chain-jobs`/`audits` need only read. The two irreversible actions —
+`season/close` and `purge-suspicious` — are two-step: first call returns a preview (close's is
+a full dry-run: root, claim count, total) + a single-use confirm token; only the identical
+request replayed with the token executes. `?dryRun=1` on both requires only read credentials.
+Every mutation audits (actor = role + salted network hint, never a raw IP). New review
+actions: `POST /api/admin/risk/release` (the ONLY path out of `risk_hold` — state machine now
+permits exactly `risk_hold → verified`; the released run gets precisely the tail a clean
+record would have gotten: leaderboard, PB check, receipt enqueue) and
+`POST /api/admin/risk/clear-user` (`flagged → none` only). `GET /api/admin/audits` serves the
+trail. `closeSeason` gained a `{ dryRun }` option (computes everything, writes nothing).
+
+**Testing — genuinely run:**
+- `adminAuth.test.ts` (7, pure): every credential combination incl. legacy fallback and
+  write-key precedence; fingerprint order-independence.
+- `admin.integration.test.ts` (7, real Postgres+Redis): confirm tokens exactly-once and
+  parameter-bound (mismatch burns); audit rows round-trip; release lands the held run on the
+  board at its real distance with exactly one receipt job and refuses a second release;
+  clear-user exactly once. State-machine tests updated (`risk_hold → verified` legal,
+  `→ verifying/receipt_queued` still not).
+- **Live over real HTTP**: season close now genuinely two-step in `verify-grid-local.ts` —
+  `confirmRequired` + preview, then confirmed execution, script asserts preview root ==
+  executed root; the live audit trail inspected afterward shows `grid.open`, `season.create`,
+  `season.close` with actor/target/metadata.
+- Fresh-DB proof (9 migrations) → 35/35 integration (+7); 94/94 unit (+7); 35/35 sim
+  (fingerprint unchanged); typechecks + `sim:check` clean; full build.
+
+**Not done in Phase 12** (see ADR 0012): named admin identities (actor field is free-text so
+they slot in later without a migration), a session-based admin UI, refuse-on-audit-failure
+mode (availability-over-completeness default, documented).
+
 <!-- Append future phase entries below this line, in commit order. -->

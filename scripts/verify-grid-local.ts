@@ -233,12 +233,23 @@ async function main() {
         `docker compose exec -T postgres psql -U postgres -d bullrush -c "UPDATE daily_grids SET created_at = to_timestamp(${Math.floor((base + 3_600_000) / 1000)}) WHERE id = '${openRes.grid.id}'"`,
         { cwd: new URL('..', import.meta.url).pathname, stdio: 'pipe' },
     );
-    const closeRes = (await (await api(`/api/admin/season/close?id=${seasonId}`, {
+    // Closing is irreversible, so it's two-step since Phase 12: the first call
+    // returns a preview + single-use confirm token; only the confirmed repeat
+    // executes. Prove both halves.
+    const closeAttempt = (await (await api(`/api/admin/season/close?id=${seasonId}`, {
         method: 'POST',
         headers: { 'x-admin-key': KEY },
+    })).json()) as { ok?: boolean; confirmRequired?: boolean; confirmToken?: string; preview?: { root: string; claimCount: number } };
+    if (!closeAttempt.confirmRequired || !closeAttempt.confirmToken) throw new Error('expected confirmRequired on first close call');
+    console.log('season close step 1: confirmRequired, preview root =', closeAttempt.preview?.root);
+
+    const closeRes = (await (await api(`/api/admin/season/close?id=${seasonId}`, {
+        method: 'POST',
+        headers: { 'x-admin-key': KEY, 'x-confirm-token': closeAttempt.confirmToken },
     })).json()) as { ok?: boolean; root?: string; claimCount?: number; totalAllocatedWei?: string; error?: string };
-    console.log('season close:', JSON.stringify(closeRes));
+    console.log('season close step 2 (confirmed):', JSON.stringify(closeRes));
     if (!closeRes.ok) throw new Error(`season close failed: ${closeRes.error}`);
+    if (closeRes.root !== closeAttempt.preview?.root) throw new Error('confirmed close root differs from preview root');
 
     const rewardsRes = (await (await api('/api/rewards/me')).json()) as {
         ok?: boolean;

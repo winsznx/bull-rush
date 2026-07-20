@@ -33,7 +33,10 @@ const VERIFIED_RUN_TRANSITIONS: Record<VerifiedRunStatus, VerifiedRunStatus[]> =
     received: ['verifying'],
     verifying: ['verified', 'risk_hold'],
     verified: ['receipt_queued'],
-    risk_hold: [], // manual review path (Phase 12) — no automatic transition out
+    // The ONLY way out of risk_hold is an operator's explicit release after
+    // manual review (Phase 12's releaseHeldRun — write-credentialed, audited).
+    // No automated path ever clears a hold.
+    risk_hold: ['verified'],
     receipt_queued: ['submitted'],
     submitted: ['confirmed'],
     confirmed: [],

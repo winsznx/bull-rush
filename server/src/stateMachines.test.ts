@@ -27,10 +27,13 @@ describe('verified_run state machine', () => {
         expect(canTransitionVerifiedRun('receipt_queued', 'submitted')).toBe(true);
         expect(canTransitionVerifiedRun('submitted', 'confirmed')).toBe(true);
     });
-    it('allows verifying -> risk_hold as a branch, with no automatic way out', () => {
+    it('allows verifying -> risk_hold, with operator release as the only way out', () => {
         expect(canTransitionVerifiedRun('verifying', 'risk_hold')).toBe(true);
-        expect(canTransitionVerifiedRun('risk_hold', 'verified')).toBe(false);
+        // Phase 12: an explicit, audited operator release clears a hold...
+        expect(canTransitionVerifiedRun('risk_hold', 'verified')).toBe(true);
+        // ...but a hold can never rewind into the automated pipeline.
         expect(canTransitionVerifiedRun('risk_hold', 'verifying')).toBe(false);
+        expect(canTransitionVerifiedRun('risk_hold', 'receipt_queued')).toBe(false);
     });
     it('rejects skipping a state (received straight to verified)', () => {
         expect(canTransitionVerifiedRun('received', 'verified')).toBe(false);

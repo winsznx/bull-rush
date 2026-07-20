@@ -40,6 +40,8 @@ import {
     getSimilarityCandidates,
     escalateRepeatOffender,
     getRiskOverview,
+    releaseHeldRun,
+    clearUserRiskState,
 } from './grid.ts';
 import {
     assessRun,
@@ -52,6 +54,9 @@ import { listChainJobs } from './chain/outbox.ts';
 import { drainJobs, startRelayerLoop } from './chain/relayer.ts';
 import { loadChainConfig } from './chain/client.ts';
 import { createSeason, closeSeason, getLatestSeason, getRewardsForUser } from './seasons.ts';
+import { resolveAdminRole, roleAllows, actionFingerprint, type AdminRole } from './adminAuth.ts';
+import { issueConfirmToken, consumeConfirmToken } from './adminConfirm.ts';
+import { audit, recentAudits } from './audit.ts';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import {
     issueNonce,
@@ -92,6 +97,24 @@ function ipHintOf(ip: string): string | null {
     if (!salt || ip === 'anon') return null;
     return createHash('sha256').update(`${salt}:${ip}`).digest('hex').slice(0, 16);
 }
+
+// Role-gated admin access (server/src/adminAuth.ts): constant-time key check,
+// read/write separation, and brute-force damping — failed attempts are
+// rate-limited per IP so the keyspace can't be hammered.
+type AdminGate = { ok: true; role: AdminRole; actor: string } | { ok: false; status: 403 | 429 };
+
+async function requireAdmin(c: Context, required: AdminRole): Promise<AdminGate> {
+    const ip = ipOf(c);
+    const role = resolveAdminRole(c.req.header('x-admin-key'));
+    if (!roleAllows(role, required)) {
+        if (!(await rateLimit(ip, 'admin-fail', 10, 60))) return { ok: false, status: 429 };
+        return { ok: false, status: 403 };
+    }
+    return { ok: true, role: role as AdminRole, actor: `admin:${role}${ipHintOf(ip) ? `@${ipHintOf(ip)}` : ''}` };
+}
+
+const adminDenied = (c: Context, gate: { status: 403 | 429 }) =>
+    c.json({ error: gate.status === 429 ? 'rate_limited' : 'forbidden' }, gate.status);
 
 const app = new Hono();
 
@@ -612,8 +635,8 @@ const SeasonCreateSchema = z.object({
 });
 
 app.post('/api/admin/season/create', async (c) => {
-    const key = process.env.ADMIN_KEY;
-    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const gate = await requireAdmin(c, 'write');
+    if (!gate.ok) return adminDenied(c, gate);
     const parsed = SeasonCreateSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
     const b = parsed.data;
@@ -627,18 +650,48 @@ app.post('/api/admin/season/create', async (c) => {
         endsAt: new Date(b.endsAt),
         claimWindowEnd: b.claimWindowEnd ? new Date(b.claimWindowEnd) : undefined,
     });
+    await audit(gate.actor, 'season.create', season.id, { name: b.name, asset: b.asset, capWei: b.capWei, startsAt: b.startsAt, endsAt: b.endsAt });
     return c.json({ ok: true, season: { id: season.id, status: season.status } });
 });
 
 // Close a season: compute entitlements from verified runs only, commit the
 // Merkle root, write eligible claim rows — refuses while the window is open.
+// Irreversible, so it takes two steps: the first call returns a preview (a full
+// dry-run) plus a single-use confirm token bound to this exact season; only the
+// repeat call carrying that token executes. ?dryRun=1 previews with read creds.
 app.post('/api/admin/season/close', async (c) => {
-    const key = process.env.ADMIN_KEY;
-    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
     const id = c.req.query('id');
     if (!id) return c.json({ error: 'bad_request' }, 400);
+    const dryRun = c.req.query('dryRun') === '1';
+    const gate = await requireAdmin(c, dryRun ? 'read' : 'write');
+    if (!gate.ok) return adminDenied(c, gate);
+
+    if (dryRun) {
+        const preview = await closeSeason(id, { dryRun: true });
+        if ('rejected' in preview) return c.json({ error: preview.rejected }, 409);
+        return c.json({ ok: true, dryRun: true, root: preview.root, claimCount: preview.claimCount, totalAllocatedWei: preview.totalAllocatedWei.toString() });
+    }
+
+    const fingerprint = actionFingerprint({ seasonId: id });
+    const confirmToken = c.req.header('x-confirm-token');
+    if (!confirmToken) {
+        const preview = await closeSeason(id, { dryRun: true });
+        if ('rejected' in preview) return c.json({ error: preview.rejected }, 409);
+        const token = await issueConfirmToken('season.close', fingerprint);
+        return c.json({
+            ok: false,
+            confirmRequired: true,
+            confirmToken: token,
+            preview: { root: preview.root, claimCount: preview.claimCount, totalAllocatedWei: preview.totalAllocatedWei.toString() },
+        });
+    }
+    if (!(await consumeConfirmToken(confirmToken, 'season.close', fingerprint))) {
+        return c.json({ error: 'invalid_confirm_token' }, 409);
+    }
+
     const result = await closeSeason(id);
     if ('rejected' in result) return c.json({ error: result.rejected }, 409);
+    await audit(gate.actor, 'season.close', id, { root: result.root, claimCount: result.claimCount, totalAllocatedWei: result.totalAllocatedWei.toString() });
     return c.json({ ok: true, root: result.root, claimCount: result.claimCount, totalAllocatedWei: result.totalAllocatedWei.toString() });
 });
 
@@ -646,10 +699,11 @@ app.post('/api/admin/season/close', async (c) => {
 // "authorised scheduler" until Phase 6's contract exists to open grids
 // on-chain; guarded the same way the other admin routes are.
 app.post('/api/admin/grid/open', async (c) => {
-    const key = process.env.ADMIN_KEY;
-    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const gate = await requireAdmin(c, 'write');
+    if (!gate.ok) return adminDenied(c, gate);
     const dayId = c.req.query('dayId');
     const grid = await openGrid(dayId || undefined);
+    await audit(gate.actor, 'grid.open', grid.dayId, { gridId: grid.id, seed: grid.seed });
     return c.json({ ok: true, grid });
 });
 
@@ -658,25 +712,27 @@ app.post('/api/admin/grid/open', async (c) => {
 // relayer below, which only processes chain_jobs); operator-triggered in the
 // interim, guarded the same way as other admin routes.
 app.post('/api/admin/sweep-expired-tickets', async (c) => {
-    const key = process.env.ADMIN_KEY;
-    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const gate = await requireAdmin(c, 'write');
+    if (!gate.ok) return adminDenied(c, gate);
     const count = await sweepExpiredTickets();
+    await audit(gate.actor, 'tickets.sweep_expired', null, { swept: count });
     return c.json({ ok: true, swept: count });
 });
 
 // Rebuild every leaderboard from Postgres (source of truth), collapsing to one
 // best row per player. Guarded by a shared secret; no-op unless ADMIN_KEY is set.
 app.post('/api/admin/rebuild', async (c) => {
-    const key = process.env.ADMIN_KEY;
-    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const gate = await requireAdmin(c, 'write');
+    if (!gate.ok) return adminDenied(c, gate);
     const result = await rebuildLeaderboards();
+    await audit(gate.actor, 'leaderboards.rebuild', null, { rows: result.rows, alltime: result.alltime });
     return c.json({ ok: true, ...result });
 });
 
 // Read-only diagnostics: is anything being hidden by the anti-cheat gate?
 app.get('/api/admin/stats', async (c) => {
-    const key = process.env.ADMIN_KEY;
-    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const gate = await requireAdmin(c, 'read');
+    if (!gate.ok) return adminDenied(c, gate);
     const [agg] = await sql`
         SELECT count(*)::int AS total,
                count(*) FILTER (WHERE suspicious)::int AS suspicious,
@@ -701,12 +757,29 @@ app.get('/api/admin/stats', async (c) => {
     return c.json({ agg, verify, top });
 });
 
-// Delete cheat/implausible rows (flagged by the anti-cheat gate). Leaves every
-// legitimate run untouched, so it is safe to re-run.
+// Delete cheat/implausible rows (flagged by the anti-cheat gate). Destructive,
+// so two-step: preview + single-use confirm token, like season/close.
+// ?dryRun=1 previews the would-be deletions with read creds.
 app.post('/api/admin/purge-suspicious', async (c) => {
-    const key = process.env.ADMIN_KEY;
-    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const dryRun = c.req.query('dryRun') === '1';
+    const gate = await requireAdmin(c, dryRun ? 'read' : 'write');
+    if (!gate.ok) return adminDenied(c, gate);
+
+    const preview = await sql`SELECT name, distance, duration_ms FROM runs WHERE suspicious = true`;
+    if (dryRun) return c.json({ ok: true, dryRun: true, wouldDelete: preview.length, rows: preview });
+
+    const fingerprint = actionFingerprint({ action: 'purge-suspicious' });
+    const confirmToken = c.req.header('x-confirm-token');
+    if (!confirmToken) {
+        const token = await issueConfirmToken('runs.purge_suspicious', fingerprint);
+        return c.json({ ok: false, confirmRequired: true, confirmToken: token, preview: { wouldDelete: preview.length } });
+    }
+    if (!(await consumeConfirmToken(confirmToken, 'runs.purge_suspicious', fingerprint))) {
+        return c.json({ error: 'invalid_confirm_token' }, 409);
+    }
+
     const deleted = await sql`DELETE FROM runs WHERE suspicious = true RETURNING name, distance, duration_ms`;
+    await audit(gate.actor, 'runs.purge_suspicious', null, { deleted: deleted.length });
     return c.json({ ok: true, deleted: deleted.length, rows: deleted });
 });
 
@@ -714,14 +787,15 @@ app.post('/api/admin/purge-suspicious', async (c) => {
 // impossible. Thresholds are tunable via query (?maxDistance=&maxDurationMs=).
 // Flags (reversible), doesn't delete — a rebuild then drops them from the board.
 app.post('/api/admin/flag-implausible', async (c) => {
-    const key = process.env.ADMIN_KEY;
-    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const gate = await requireAdmin(c, 'write');
+    if (!gate.ok) return adminDenied(c, gate);
     const maxDistance = Number(c.req.query('maxDistance') || 50_000);
     const maxDurationMs = Number(c.req.query('maxDurationMs') || MAX_RUN_MS);
     const flagged = await sql`
         UPDATE runs SET suspicious = true
         WHERE suspicious = false AND (distance > ${maxDistance} OR duration_ms > ${maxDurationMs})
         RETURNING name, distance, duration_ms`;
+    await audit(gate.actor, 'runs.flag_implausible', null, { flagged: flagged.length, maxDistance, maxDurationMs });
     return c.json({ ok: true, flagged: flagged.length, maxDistance, maxDurationMs, rows: flagged });
 });
 
@@ -729,18 +803,52 @@ app.post('/api/admin/flag-implausible', async (c) => {
 // reasons, repeat-flagged users, and shared-network-origin wallet clusters
 // (review signals, never automatic punishment — see server/src/behavior.ts).
 app.get('/api/admin/risk', async (c) => {
-    const key = process.env.ADMIN_KEY;
-    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const gate = await requireAdmin(c, 'read');
+    if (!gate.ok) return adminDenied(c, gate);
     const limit = Math.max(1, Math.min(200, Number(c.req.query('limit')) || 50));
     const overview = await getRiskOverview(limit);
     return c.json({ ok: true, ...overview });
 });
 
+// Manual-review actions (Phase 12). Release: the ONLY path out of risk_hold —
+// the run lands exactly where a clean record would have (leaderboard, receipt
+// queue) — write-credentialed and audited. Clear-user: flagged -> none only.
+app.post('/api/admin/risk/release', async (c) => {
+    const gate = await requireAdmin(c, 'write');
+    if (!gate.ok) return adminDenied(c, gate);
+    const runId = c.req.query('runId');
+    if (!runId) return c.json({ error: 'bad_request' }, 400);
+    const result = await releaseHeldRun(runId);
+    if (!result.released) return c.json({ error: 'not_held_or_not_found' }, 404);
+    await audit(gate.actor, 'risk.release_run', runId, { isPersonalBest: result.isPersonalBest ?? false });
+    return c.json({ ok: true, ...result });
+});
+
+app.post('/api/admin/risk/clear-user', async (c) => {
+    const gate = await requireAdmin(c, 'write');
+    if (!gate.ok) return adminDenied(c, gate);
+    const identityKey = c.req.query('identityKey');
+    if (!identityKey) return c.json({ error: 'bad_request' }, 400);
+    const cleared = await clearUserRiskState(identityKey);
+    if (!cleared) return c.json({ error: 'not_flagged_or_not_found' }, 404);
+    await audit(gate.actor, 'risk.clear_user', identityKey, {});
+    return c.json({ ok: true });
+});
+
+// The audit trail itself — every admin mutation lands here (server/src/audit.ts).
+app.get('/api/admin/audits', async (c) => {
+    const gate = await requireAdmin(c, 'read');
+    if (!gate.ok) return adminDenied(c, gate);
+    const limit = Math.max(1, Math.min(500, Number(c.req.query('limit')) || 100));
+    const audits = await recentAudits(limit);
+    return c.json({ ok: true, audits });
+});
+
 // Read-only visibility into the relayer's outbox — is anything stuck pending/failed?
 // (Phase 12/13 will add real alerting; this is the interim operator view.)
 app.get('/api/admin/chain-jobs', async (c) => {
-    const key = process.env.ADMIN_KEY;
-    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const gate = await requireAdmin(c, 'read');
+    if (!gate.ok) return adminDenied(c, gate);
     const limit = Math.max(1, Math.min(200, Number(c.req.query('limit')) || 50));
     const jobs = await listChainJobs(limit);
     return c.json({ ok: true, jobs });
@@ -750,12 +858,13 @@ app.get('/api/admin/chain-jobs', async (c) => {
 // (400) if CHAIN_RELAYER_ENABLED isn't set — there is nothing deployed to relay to yet
 // in most environments; Phase 15 is the gated point where that changes.
 app.post('/api/admin/chain-jobs/process', async (c) => {
-    const key = process.env.ADMIN_KEY;
-    if (!key || c.req.header('x-admin-key') !== key) return c.json({ error: 'forbidden' }, 403);
+    const gate = await requireAdmin(c, 'write');
+    if (!gate.ok) return adminDenied(c, gate);
     const config = loadChainConfig();
     if (!config) return c.json({ error: 'relayer_disabled' }, 400);
     const max = Math.max(1, Math.min(50, Number(c.req.query('max')) || 10));
     const processed = await drainJobs(config, max);
+    await audit(gate.actor, 'chain_jobs.process', null, { processed, max });
     return c.json({ ok: true, processed });
 });
 
