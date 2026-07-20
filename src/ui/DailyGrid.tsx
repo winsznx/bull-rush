@@ -121,6 +121,13 @@ export function DailyGrid() {
                             <span>GRID {grid.dayId}</span>
                             <strong style={{ fontSize: '1rem' }}>{grid.seed.slice(0, 10)}…</strong>
                         </div>
+                        {/* The seed is shown as PROOF, not as something the player
+                            supplies. Without this line it reads as an input field the
+                            player is missing — which is exactly how it was misread. */}
+                        <p className="seed-note">
+                            Everyone races this exact course today. The seed above is published so anyone can check it
+                            wasn&rsquo;t hand-picked &mdash; you don&rsquo;t need it to play. Connect and we issue your run.
+                        </p>
                         <div className="stats">
                             <div>
                                 <span>{grid.isOpenForTickets ? 'CLOSES IN' : 'OPENS IN'}</span>

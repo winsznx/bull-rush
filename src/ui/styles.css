@@ -181,6 +181,14 @@ body,
     font-size: 13px;
     text-shadow: 0 0 12px rgba(57, 230, 255, 0.7);
 }
+.seed-note {
+    color: #6b7688;
+    font-size: 11px;
+    line-height: 1.5;
+    letter-spacing: 0.04em;
+    max-width: 42ch;
+    margin: 2px auto 0;
+}
 .receipt-status {
     color: #6b7688;
     font-weight: 700;

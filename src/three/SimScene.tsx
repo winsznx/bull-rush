@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { useTexture, Trail } from '@react-three/drei';
 import * as THREE from 'three';
@@ -11,6 +11,51 @@ import { Act } from '../sim/sim';
 import { activeSim } from '../sim/active';
 
 const DASH_CD_TICKS = Math.round(2.2 * 60);
+
+// Static neon skyline flanking the track. Purely decorative — it renders nothing
+// the simulation knows about, so it cannot affect determinism or RULESET_HASH.
+// Placement is a pure function of the index (no Math.random) so the city is
+// identical every run and never re-shuffles across React re-renders.
+const SKYLINE_SPACING = 26;
+const SKYLINE_COUNT = 160;
+
+function Skyline({ tex }: { tex: THREE.Texture }) {
+    const blocks = useMemo(() => {
+        const out: { key: string; pos: [number, number, number]; size: [number, number, number] }[] = [];
+        for (let i = 0; i < SKYLINE_COUNT; i++) {
+            for (const side of [-1, 1] as const) {
+                // deterministic pseudo-variation from the index alone
+                const h = 8 + ((i * 7 + (side === 1 ? 3 : 0)) % 6) * 2.5;
+                const depth = 5 + ((i * 3) % 4);
+                const lateral = side * (11 + ((i * 5) % 5));
+                const z = -SKYLINE_SPACING * i - ((i * 11) % 9);
+                out.push({
+                    key: `${i}:${side}`,
+                    pos: [lateral, h / 2, z],
+                    size: [5 + ((i * 2) % 3), h, depth],
+                });
+            }
+        }
+        return out;
+    }, []);
+
+    return (
+        <group>
+            {blocks.map((b) => (
+                <mesh key={b.key} position={b.pos}>
+                    <boxGeometry args={b.size} />
+                    <meshStandardMaterial
+                        map={tex}
+                        emissiveMap={tex}
+                        emissive="#ffffff"
+                        emissiveIntensity={0.7}
+                        color="#0a0e1a"
+                    />
+                </mesh>
+            ))}
+        </group>
+    );
+}
 
 // Sim-driven scene: the render layer reads from a deterministic SimRunner instead
 // of computing its own float physics + Math.random spawns. Reuses the exact bull
@@ -240,6 +285,7 @@ export function SimScene() {
                 <planeGeometry args={[40, 4200]} />
                 <meshStandardMaterial map={groundTex} color="#7a7a7a" roughness={0.85} metalness={0.15} />
             </mesh>
+            <Skyline tex={buildingTex} />
             {[-0.5, 0.5].map((o) => (
                 <mesh key={o} position={[o * LANE_WIDTH, 0.04, -1900]}>
                     <boxGeometry args={[0.08, 0.02, 4200]} />

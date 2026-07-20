@@ -53,6 +53,7 @@ import {
 import { listChainJobs } from './chain/outbox.ts';
 import { drainJobs, startRelayerLoop } from './chain/relayer.ts';
 import { loadChainConfig } from './chain/client.ts';
+import { startGridScheduler } from './scheduler.ts';
 import { createSeason, closeSeason, getLatestSeason, getRewardsForUser } from './seasons.ts';
 import { resolveAdminRole, roleAllows, actionFingerprint, type AdminRole } from './adminAuth.ts';
 import { issueConfirmToken, consumeConfirmToken } from './adminConfirm.ts';
@@ -987,6 +988,10 @@ await assertMigrationsApplied();
 
 // No-op in every environment before Phase 15 deploys real contracts — loadChainConfig
 // returns null unless CHAIN_RELAYER_ENABLED=true and every required env var is set.
+// Guarantees a Daily Grid exists every day without an operator remembering to
+// create one (idempotent + hourly self-heal — see server/src/scheduler.ts).
+startGridScheduler();
+
 const chainConfig = loadChainConfig();
 if (chainConfig) {
     startRelayerLoop(chainConfig, 15_000);
